@@ -6,6 +6,7 @@ html,
 body {
   max-width: 100vw;
   overflow-x: hidden;
+  font-size: 16px;
 }
 
 body {
@@ -22,6 +23,6 @@ body {
 }
 
 a {
-  color: inherit;
+  color: #0000EE; /* Standard blue link color */
   text-decoration: none;
 }
