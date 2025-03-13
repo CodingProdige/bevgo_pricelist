@@ -51,12 +51,16 @@ const extractProductKeyword = (title) => {
 const keywordOrder = Object.fromEntries(keywords.map((k, index) => [k, index + 1]));
 keywordOrder["Other"] = keywords.length + 1;
 
-export async function GET() {
+export async function GET(req) {
   try {
+    const { searchParams } = new URL(req.url);
+    const categoryFilter = searchParams.get("category")?.trim() || "";
+    const searchQuery = searchParams.get("search")?.toLowerCase().trim() || "";
+
     const querySnapshot = await getDocs(collection(db, "products"));
     const existingCodes = new Set();
 
-    const products = await Promise.all(
+    let products = await Promise.all(
       querySnapshot.docs.map(async (docSnapshot) => {
         const productData = docSnapshot.data();
         let uniqueCode = productData.unique_code;
@@ -79,7 +83,21 @@ export async function GET() {
       })
     );
 
-    // Group by product_brand
+    // Step 1: Filter products by category (if provided)
+    if (categoryFilter) {
+      products = products.filter((product) =>
+        product.product_brand?.toLowerCase() === categoryFilter.toLowerCase()
+      );
+    }
+
+    // Step 2: Filter products by search query (if provided)
+    if (searchQuery) {
+      products = products.filter((product) =>
+        product.product_title?.toLowerCase().includes(searchQuery)
+      );
+    }
+
+    // Step 3: Group products by brand
     const groupedProducts = products.reduce((acc, product) => {
       const brand = product.product_brand || "Unknown Brand";
       if (!acc[brand]) {
@@ -89,7 +107,7 @@ export async function GET() {
       return acc;
     }, {});
 
-    // Sort products within each brand
+    // Step 4: Sort products within each category
     Object.keys(groupedProducts).forEach((brand) => {
       groupedProducts[brand].sort((a, b) => {
         if (a.extracted_size !== b.extracted_size) {
@@ -105,14 +123,7 @@ export async function GET() {
       });
     });
 
-    // Order categories (brands) alphabetically
-    const sortedBrands = Object.keys(groupedProducts).sort();
-    const sortedGroupedProducts = {};
-    sortedBrands.forEach((brand) => {
-      sortedGroupedProducts[brand] = groupedProducts[brand];
-    });
-
-    return new Response(JSON.stringify(sortedGroupedProducts), {
+    return new Response(JSON.stringify(groupedProducts), {
       headers: { "Content-Type": "application/json" },
     });
   } catch (error) {
