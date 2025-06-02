@@ -94,7 +94,7 @@ For partial returns (e.g., half crates or missing bottles), only the crate itsel
                     <th className={styles.tableHeader}>Product Size</th>
                     <th className={styles.tableHeader}>Product Type</th>
                     <th className={styles.tableHeader}>Return Type</th>
-                    <th className={styles.tableHeader}>Unit Price (Incl. VAT)</th>
+                    <th className={styles.tableHeader}>Unit Price (Excl. VAT)</th>
                     <th className={styles.tableHeader}>Code</th>
                   </tr>
                 </thead>

@@ -1,17 +1,15 @@
-import { db } from "@/lib/firebase"; // Firestore
+import { db } from "@/lib/firebase";
 import { collection, getDocs, doc, updateDoc } from "firebase/firestore";
 
-// Function to generate a unique 3-digit code
 const generateUniqueCode = async (existingCodes) => {
   let code;
   do {
-    code = Math.floor(100 + Math.random() * 900).toString(); // Generate a 3-digit number
-  } while (existingCodes.has(code)); // Ensure uniqueness
+    code = Math.floor(100 + Math.random() * 900).toString();
+  } while (existingCodes.has(code));
   existingCodes.add(code);
   return code;
 };
 
-// Function to extract bottle size from product title
 const extractBottleSize = (title) => {
   if (!title) return 0;
   const match = title.match(/(\d+(\.\d+)?)\s?(ml|l|lt)/i);
@@ -22,7 +20,6 @@ const extractBottleSize = (title) => {
   return 0;
 };
 
-// Function to determine product type
 const extractProductType = (title) => {
   if (!title) return "Other";
   if (title.toLowerCase().includes("can")) return "Cans";
@@ -48,7 +45,7 @@ const extractProductKeyword = (title) => {
   return "Other";
 };
 
-const keywordOrder = Object.fromEntries(keywords.map((k, index) => [k, index + 1]));
+const keywordOrder = Object.fromEntries(keywords.map((k, i) => [k, i + 1]));
 keywordOrder["Other"] = keywords.length + 1;
 
 export async function GET(req) {
@@ -56,6 +53,29 @@ export async function GET(req) {
     const { searchParams } = new URL(req.url);
     const categoryFilter = searchParams.get("category")?.trim() || "";
     const searchQuery = searchParams.get("search")?.toLowerCase().trim() || "";
+    const companyCode = searchParams.get("companyCode")?.trim();
+
+    let favoriteCodes = [];
+
+    // ✅ Fetch user favorites if category is "Favorites"
+    if (categoryFilter.toLowerCase() === "favorites" && companyCode) {
+      try {
+        const res = await fetch("https://bevgo-client.vercel.app/api/getUser", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ companyCode }),
+        });
+
+        if (!res.ok) throw new Error(`User fetch failed: ${res.status}`);
+        const json = await res.json();
+
+        favoriteCodes = Array.isArray(json?.data?.favorites_unique_codes)
+          ? json.data.favorites_unique_codes
+          : [];
+      } catch (err) {
+        console.warn("⚠️ Failed to fetch user favorites:", err.message);
+      }
+    }
 
     const querySnapshot = await getDocs(collection(db, "products"));
     const existingCodes = new Set();
@@ -63,12 +83,6 @@ export async function GET(req) {
     let products = await Promise.all(
       querySnapshot.docs.map(async (docSnapshot) => {
         const productData = docSnapshot.data();
-
-        // ✅ Exclude products with `is_special_pricing` set to true
-        if (productData.is_special_pricing === true) {
-          return null;
-        }
-
         let uniqueCode = productData.unique_code;
 
         if (!uniqueCode) {
@@ -89,36 +103,37 @@ export async function GET(req) {
       })
     );
 
-    // ✅ Filter out null values from excluded products
-    products = products.filter((product) => product !== null);
+    products = products.filter(Boolean);
 
-    // Step 1: Filter products by category (if provided)
-    if (categoryFilter) {
+    // ✅ Favorites filter
+    if (categoryFilter.toLowerCase() === "favorites") {
+      products = products.filter((product) =>
+        favoriteCodes.includes(String(product.unique_code))
+      );
+    } else if (categoryFilter) {
       products = products.filter((product) =>
         product.product_brand?.toLowerCase() === categoryFilter.toLowerCase()
       );
     }
 
-    // Step 2: Filter products by search query (if provided)
+    // ✅ Search filter
     if (searchQuery) {
       products = products.filter((product) =>
         product.product_title?.toLowerCase().includes(searchQuery)
       );
     }
 
-    // Step 3: Group products by brand
-    const groupedProducts = products.reduce((acc, product) => {
+    // ✅ Group by brand
+    const grouped = products.reduce((acc, product) => {
       const brand = product.product_brand || "Unknown Brand";
-      if (!acc[brand]) {
-        acc[brand] = [];
-      }
+      if (!acc[brand]) acc[brand] = [];
       acc[brand].push(product);
       return acc;
     }, {});
 
-    // Step 4: Sort products within each category
-    Object.keys(groupedProducts).forEach((brand) => {
-      groupedProducts[brand].sort((a, b) => {
+    // ✅ Sort products within each brand group
+    Object.keys(grouped).forEach((brand) => {
+      grouped[brand].sort((a, b) => {
         if (a.extracted_size !== b.extracted_size) {
           return a.extracted_size - b.extracted_size;
         }
@@ -132,7 +147,12 @@ export async function GET(req) {
       });
     });
 
-    return new Response(JSON.stringify(groupedProducts), {
+    // ✅ Return flat list if Favorites, else grouped
+    const responseData = categoryFilter.toLowerCase() === "favorites"
+      ? products
+      : Object.values(grouped);
+
+    return new Response(JSON.stringify(responseData), {
       headers: { "Content-Type": "application/json" },
     });
   } catch (error) {

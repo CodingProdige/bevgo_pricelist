@@ -18,7 +18,7 @@ export async function GET(req) {
       }
     });
 
-    // Convert Set to an array, sort alphabetically
+    // Convert Set to array and sort alphabetically
     let uniqueCategories = Array.from(productBrands).sort();
 
     // Filter by search query if provided
@@ -26,6 +26,11 @@ export async function GET(req) {
       uniqueCategories = uniqueCategories.filter((brand) =>
         brand.toLowerCase().includes(searchQuery)
       );
+    }
+
+    // ✅ Always add "Favorites" at the top
+    if (!searchQuery || "favorites".includes(searchQuery)) {
+      uniqueCategories = ["Favorites", ...uniqueCategories];
     }
 
     return new Response(JSON.stringify(uniqueCategories), {
