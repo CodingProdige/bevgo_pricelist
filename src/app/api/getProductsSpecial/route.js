@@ -51,14 +51,14 @@ keywordOrder["Other"] = keywords.length + 1;
 export async function GET(req) {
   try {
     const { searchParams } = new URL(req.url);
-    const categoryFilter = searchParams.get("category")?.trim() || "";
-    const searchQuery = searchParams.get("search")?.toLowerCase().trim() || "";
-    const companyCode = searchParams.get("companyCode")?.trim();
+    const categoryFilter = (searchParams.get("category") || "").trim().toLowerCase();
+    const searchQuery = (searchParams.get("search") || "").toLowerCase().trim();
+    const companyCode = (searchParams.get("companyCode") || "").trim();
 
     let favoriteCodes = [];
 
-    // ✅ Fetch user favorites if category is "Favorites"
-    if (categoryFilter.toLowerCase() === "favorites" && companyCode) {
+    // Fetch user favorites if category is "favorites"
+    if (categoryFilter === "favorites" && companyCode) {
       try {
         const res = await fetch("https://bevgo-client.vercel.app/api/getUser", {
           method: "POST",
@@ -66,7 +66,7 @@ export async function GET(req) {
           body: JSON.stringify({ companyCode }),
         });
 
-        if (!res.ok) throw new Error(`User fetch failed: ${res.status}`);
+        if (!res.ok) throw new Error("User fetch failed: " + res.status);
         const json = await res.json();
 
         favoriteCodes = Array.isArray(json?.data?.favorites_unique_codes)
@@ -105,25 +105,27 @@ export async function GET(req) {
 
     products = products.filter(Boolean);
 
-    // ✅ Favorites filter
-    if (categoryFilter.toLowerCase() === "favorites") {
+    // Filter logic based on category
+    if (categoryFilter === "favorites") {
       products = products.filter((product) =>
         favoriteCodes.includes(String(product.unique_code))
       );
+    } else if (categoryFilter === "sale") {
+      products = products.filter((product) => product.on_sale === true);
     } else if (categoryFilter) {
       products = products.filter((product) =>
-        product.product_brand?.toLowerCase() === categoryFilter.toLowerCase()
+        (product.product_brand || "").toLowerCase() === categoryFilter
       );
     }
 
-    // ✅ Search filter
+    // Apply search filter
     if (searchQuery) {
       products = products.filter((product) =>
-        product.product_title?.toLowerCase().includes(searchQuery)
+        (product.product_title || "").toLowerCase().includes(searchQuery)
       );
     }
 
-    // ✅ Group by brand
+    // Group by brand
     const grouped = products.reduce((acc, product) => {
       const brand = product.product_brand || "Unknown Brand";
       if (!acc[brand]) acc[brand] = [];
@@ -131,7 +133,7 @@ export async function GET(req) {
       return acc;
     }, {});
 
-    // ✅ Sort products within each brand group
+    // Sort within each brand group
     Object.keys(grouped).forEach((brand) => {
       grouped[brand].sort((a, b) => {
         if (a.extracted_size !== b.extracted_size) {
@@ -147,10 +149,9 @@ export async function GET(req) {
       });
     });
 
-    // ✅ Return flat list if Favorites, else grouped
-    const responseData = categoryFilter.toLowerCase() === "favorites"
-      ? products
-      : Object.values(grouped);
+    // Flat list for favorites or sale; grouped otherwise
+    const isFlatList = categoryFilter === "favorites" || categoryFilter === "sale";
+    const responseData = isFlatList ? products : Object.values(grouped);
 
     return new Response(JSON.stringify(responseData), {
       headers: { "Content-Type": "application/json" },
@@ -162,3 +163,4 @@ export async function GET(req) {
     });
   }
 }
+

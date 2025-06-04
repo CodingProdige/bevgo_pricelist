@@ -28,10 +28,11 @@ export async function GET(req) {
       );
     }
 
+
     // ✅ Always add "Favorites" at the top
-    if (!searchQuery || "favorites".includes(searchQuery)) {
-      uniqueCategories = ["Favorites", ...uniqueCategories];
-    }
+    // if (!searchQuery || "favorites".includes(searchQuery)) {
+    //   uniqueCategories = ["Favorites", ...uniqueCategories];
+    // }
 
     return new Response(JSON.stringify(uniqueCategories), {
       status: 200,
