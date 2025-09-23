@@ -52,6 +52,7 @@ export async function GET(req) {
   try {
     const { searchParams } = new URL(req.url);
     const categoryFilter = (searchParams.get("category") || "").trim().toLowerCase();
+    const topCategoryFilter = (searchParams.get("topCategory") || "").trim().toLowerCase(); // <-- NEW
     const searchQuery = (searchParams.get("search") || "").toLowerCase().trim();
     const companyCode = (searchParams.get("companyCode") || "").trim();
 
@@ -105,7 +106,7 @@ export async function GET(req) {
 
     products = products.filter(Boolean);
 
-    // Filter logic based on category
+    // Filter logic based on category (first condition)
     if (categoryFilter === "favorites") {
       products = products.filter((product) =>
         favoriteCodes.includes(String(product.unique_code))
@@ -114,7 +115,14 @@ export async function GET(req) {
       products = products.filter((product) => product.on_sale === true);
     } else if (categoryFilter) {
       products = products.filter((product) =>
-        (product.product_brand || "").toLowerCase() === categoryFilter
+        ((product.product_brand || "").toLowerCase() === categoryFilter)
+      );
+    }
+
+    // Apply topCategory filter (second condition; AND with above if both present)
+    if (topCategoryFilter) {
+      products = products.filter((product) =>
+        ((product.product_category || "").toLowerCase() === topCategoryFilter)
       );
     }
 
@@ -145,7 +153,7 @@ export async function GET(req) {
         if (keywordOrder[a.product_keyword] !== keywordOrder[b.product_keyword]) {
           return keywordOrder[a.product_keyword] - keywordOrder[b.product_keyword];
         }
-        return a.product_title.localeCompare(b.product_title);
+        return (a.product_title || "").localeCompare(b.product_title || "");
       });
     });
 
@@ -163,4 +171,3 @@ export async function GET(req) {
     });
   }
 }
-
