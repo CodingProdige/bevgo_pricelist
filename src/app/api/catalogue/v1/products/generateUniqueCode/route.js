@@ -1,16 +1,14 @@
 /**
- * Generate a unique 8-digit code for products_v2 (for products and/or variants).
+ * Generate a unique 8-digit code used across products, variants, and returnables.
  *
  * METHOD: GET
  * PURPOSE:
- *   - Returns a numeric 8-digit string (10,000,000–99,999,999) not used anywhere in products_v2.
- *   - Used for product.product.unique_id and variants[].variant_id.
+ *   - Returns an 8-digit numeric string (10,000,000–99,999,999) not used anywhere in:
+ *       - products_v2.product.unique_id
+ *       - products_v2.variants[].variant_id
+ *       - returnables (docId)
+ *       - returnables.returnable.returnable_id
  *   - No writes; purely returns a free code for the caller to use.
- *
- * UNIQUENESS:
- *   - Scans products_v2 and collects all existing codes from:
- *       - product.unique_id
- *       - variants[].variant_id
  */
 
 import { NextResponse } from "next/server";
@@ -21,25 +19,46 @@ import { collection, getDocs } from "firebase/firestore";
 const gen8 = () =>
   Math.floor(10_000_000 + Math.random() * 90_000_000).toString();
 
-const ok  = (p={},s=200)=>NextResponse.json({ ok:true, ...p },{ status:s });
-const err = (s,t,m,e={})=>NextResponse.json({ ok:false, title:t, message:m, ...e },{ status:s });
+const ok  = (p = {}, s = 200) => NextResponse.json({ ok: true, ...p }, { status: s });
+const err = (s, t, m, e = {}) => NextResponse.json({ ok: false, title: t, message: m, ...e }, { status: s });
 
-/* gather all existing product.unique_id and variants[*].variant_id */
+const is8 = (s) => /^\d{8}$/.test(String(s ?? "").trim());
+
+/** Gather all existing 8-digit codes across products, variants, and returnables */
 async function collectExistingCodes() {
   try {
-    const snap = await getDocs(collection(db, "products_v2"));
     const seen = new Set();
-    for (const d of snap.docs) {
-      const data = d.data() || {};
-      const pCode = data?.product?.unique_id;
-      if (typeof pCode === "string" && pCode.length) seen.add(pCode);
 
-      const variants = Array.isArray(data?.variants) ? data.variants : [];
-      for (const v of variants) {
-        const vCode = v?.variant_id; // <-- updated to variant_id
-        if (typeof vCode === "string" && vCode.length) seen.add(vCode);
+    // products_v2: product.unique_id + variants[].variant_id
+    {
+      const snap = await getDocs(collection(db, "products_v2"));
+      for (const d of snap.docs) {
+        const data = d.data() || {};
+
+        const pCode = String(data?.product?.unique_id ?? "").trim();
+        if (is8(pCode)) seen.add(pCode);
+
+        const variants = Array.isArray(data?.variants) ? data.variants : [];
+        for (const v of variants) {
+          const vCode = String(v?.variant_id ?? "").trim();
+          if (is8(vCode)) seen.add(vCode);
+        }
       }
     }
+
+    // returnables: docId (d.id) + returnable.returnable_id
+    {
+      const rsnap = await getDocs(collection(db, "returnables"));
+      for (const d of rsnap.docs) {
+        const data = d.data() || {};
+        const docId = String(d.id).trim();
+        if (is8(docId)) seen.add(docId);
+
+        const rCode = String(data?.returnable?.returnable_id ?? "").trim();
+        if (is8(rCode)) seen.add(rCode);
+      }
+    }
+
     return seen;
   } catch {
     throw new Error("FIRESTORE_LIST_FAILED");
@@ -71,7 +90,7 @@ export async function GET() {
       return err(
         502,
         "Fetch Failed",
-        "We couldn’t read existing codes from products_v2. Check your network/Firestore rules."
+        "We couldn’t read existing codes from Firestore. Check your network/Firestore rules."
       );
     }
     return err(500, "Unexpected Error", "Something went wrong while generating a unique code.");
