@@ -1,4 +1,3 @@
-// app/api/returnables/update/route.js
 import { NextResponse } from "next/server";
 import { db } from "@/lib/firebase";
 import { doc, getDoc, updateDoc, serverTimestamp, getDocs, collection } from "firebase/firestore";
@@ -26,95 +25,61 @@ function deepMerge(t, p){
   return out;
 }
 
-async function slugTaken(slug, exceptId){
-  const snap = await getDocs(collection(db,"returnables"));
-  for (const d of snap.docs){
-    if (d.id === exceptId) continue;
-    const s = String(d.data()?.returnable?.slug ?? "").trim().toLowerCase();
-    if (s && s === slug.toLowerCase()) return true;
-  }
-  return false;
-}
-
-async function unitExists(unit){
-  const u = String(unit??"").trim().toLowerCase();
-  if (!u) return true; // treat empty as "no change"
-  const snap = await getDocs(collection(db,"volume_units"));
-  for (const d of snap.docs){
-    const sym = String(d.data()?.symbol ?? "").trim().toLowerCase();
-    if (sym === u) return true;
-  }
-  return false;
-}
-
 export async function POST(req){
   try{
     const { returnable_id, data } = await req.json();
-
     const rid = String(returnable_id ?? "").trim();
-    if (!is8(rid)) return err(400,"Invalid Returnable ID","'returnable_id' must be an 8-digit string.");
-    if (!data || typeof data!=="object") return err(400,"Invalid Data","Provide a 'data' object.");
 
-    const ref = doc(db,"returnables", rid);
+    if (!is8(rid))
+      return err(400,"Invalid Returnable ID","'returnable_id' must be an 8-digit string.");
+    if (!data || typeof data!=="object")
+      return err(400,"Invalid Data","Provide a 'data' object.");
+
+    const ref = doc(db,"returnables_v2", rid);
     const snap = await getDoc(ref);
-    if (!snap.exists()) return err(404,"Not Found",`No returnable with id '${rid}'.`);
+    if (!snap.exists())
+      return err(404,"Not Found",`No returnable with id '${rid}'.`);
 
-    let patch = { ...data };
+    const current = snap.data() || {};
+    const next = deepMerge(current, data);
 
-    // sanitize fields if present
-    if (patch.returnable){
-      if (Object.prototype.hasOwnProperty.call(patch.returnable,"slug")){
-        const slug = slugify(String(patch.returnable.slug ?? ""));
-        if (!slug) return err(400,"Invalid Slug","'returnable.slug' cannot be empty.");
-        if (await slugTaken(slug, rid)) return err(409,"Duplicate Slug",`A returnable with slug '${slug}' already exists.`);
-        patch.returnable.slug = slug;
-      }
-      if (Object.prototype.hasOwnProperty.call(patch.returnable,"returnable_id")){
-        // prevent changing id
-        const incoming = String(patch.returnable.returnable_id ?? "").trim();
-        if (incoming && incoming !== rid){
-          return err(409,"Mismatched ID","'returnable.returnable_id' cannot differ from the document id.");
-        }
-      }
-    }
-
-    if (patch.pricing){
-      if (Object.prototype.hasOwnProperty.call(patch.pricing,"partial_returnable_price_excl")){
-        patch.pricing.partial_returnable_price_excl = money2(patch.pricing.partial_returnable_price_excl);
-      }
-      if (Object.prototype.hasOwnProperty.call(patch.pricing,"full_returnable_price_excl")){
-        patch.pricing.full_returnable_price_excl = money2(patch.pricing.full_returnable_price_excl);
-      }
-    }
-
-    if (patch.pack){
-      if (Object.prototype.hasOwnProperty.call(patch.pack,"volume")){
-        patch.pack.volume = Math.max(0, toNum(patch.pack.volume));
-      }
-      if (Object.prototype.hasOwnProperty.call(patch.pack,"volume_unit")){
-        const vu = String(patch.pack.volume_unit ?? "").trim();
-        if (vu && !(await unitExists(vu))) {
-          return err(400,"Unknown Volume Unit",`'${vu}' is not in volume_units.`);
-        }
-        patch.pack.volume_unit = vu || null;
-      }
-    }
-
-    if (patch.placement){
-      if (Object.prototype.hasOwnProperty.call(patch.placement,"position")){
-        const p = Math.trunc(+patch.placement.position);
-        if (Number.isFinite(p) && p>0) patch.placement.position = p;
-        else delete patch.placement.position; // ignore invalid position
-      }
-    }
-
-    const next = deepMerge(snap.data()||{}, patch);
+    if (next?.returnable?.slug)
+      next.returnable.slug = slugify(next.returnable.slug);
 
     await updateDoc(ref, { ...next, "timestamps.updatedAt": serverTimestamp() });
 
-    return ok({ message:"Returnable updated.", returnable_id: rid });
+    // 🔄 Propagate to all variants within products_v2
+    const prods = await getDocs(collection(db,"products_v2"));
+    let count = 0;
+    for (const d of prods.docs){
+      const pdata = d.data() || {};
+      const variants = Array.isArray(pdata.variants) ? [...pdata.variants] : [];
+      let modified = false;
+
+      for (let i=0; i<variants.length; i++){
+        if (variants[i]?.returnable?.returnable_id === rid){
+          variants[i].returnable = next;
+          modified = true;
+          count++;
+        }
+      }
+
+      if (modified){
+        await updateDoc(doc(db,"products_v2", d.id), {
+          variants,
+          "timestamps.updatedAt": serverTimestamp()
+        });
+      }
+    }
+
+    return ok({
+      message:`Returnable updated and propagated to ${count} variant${count!==1?"s":""}.`,
+      returnable_id: rid,
+      propagated_variants: count
+    });
+
   }catch(e){
-    console.error("returnables/update failed:", e);
+    console.error("returnables_v2/update failed:", e);
     return err(500,"Unexpected Error","Something went wrong while updating the returnable.");
   }
 }

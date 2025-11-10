@@ -21,7 +21,6 @@ const toBool= (v, f = false) =>
 const toInt = (v, f = 0) => Number.isFinite(+v) ? Math.trunc(+v) : f;
 
 /* ---------------- field sanitizers ---------------- */
-/** Accept comma string or array -> trimmed, lowercased, de-duplicated array */
 function parseKeywords(value){
   const raw = Array.isArray(value) ? value.join(",") : (value ?? "");
   return String(raw)
@@ -33,6 +32,7 @@ function parseKeywords(value){
     .slice(0, 100);
 }
 
+// Only validate real URLs for imageUrl
 function sanitizeUrl(u){
   if (u == null) return null;
   const s = String(u).trim();
@@ -41,21 +41,40 @@ function sanitizeUrl(u){
   return null; // reject others
 }
 
+// Accept any non-empty string for blurhash
+function sanitizeBlurHash(v){
+  if (v == null) return null;
+  const s = String(v).trim();
+  return s.length ? s : null;
+}
+
 /** Normalize a single image input -> { imageUrl, blurHashUrl, position? } */
 function parseImage(input, fallbackPos = null){
-  if (!input) return { imageUrl: null, blurHashUrl: null, ...(fallbackPos ? { position: fallbackPos } : {}) };
-  if (typeof input === "string") {
-    return { imageUrl: sanitizeUrl(input), blurHashUrl: null, ...(fallbackPos ? { position: fallbackPos } : {}) };
+  if (!input) {
+    const base = { imageUrl: null, blurHashUrl: null };
+    return fallbackPos ? { ...base, position: fallbackPos } : base;
   }
+
+  if (typeof input === "string") {
+    // String inputs treated as imageUrl only
+    const base = { imageUrl: sanitizeUrl(input), blurHashUrl: null };
+    return fallbackPos ? { ...base, position: fallbackPos } : base;
+  }
+
   if (typeof input === "object"){
     const imageUrl    = sanitizeUrl(input.imageUrl ?? input.url);
-    const blurHashUrl = sanitizeUrl(input.blurHashUrl ?? input.blurhash ?? input.blurHash);
-    // Allow optional position on create; normalize to int if present
+    // accept blurhash from any common key without URL validation
+    const blurHashUrl = sanitizeBlurHash(input.blurHashUrl ?? input.blurhash ?? input.blurHash);
+
     const pos = Number.isFinite(+input?.position) ? toInt(input.position, undefined) : undefined;
     const base = { imageUrl, blurHashUrl };
-    return pos != null ? { ...base, position: pos } : (fallbackPos ? { ...base, position: fallbackPos } : base);
+    return pos != null
+      ? { ...base, position: pos }
+      : (fallbackPos ? { ...base, position: fallbackPos } : base);
   }
-  return { imageUrl: null, blurHashUrl: null, ...(fallbackPos ? { position: fallbackPos } : {}) };
+
+  const base = { imageUrl: null, blurHashUrl: null };
+  return fallbackPos ? { ...base, position: fallbackPos } : base;
 }
 
 /** Normalize many -> array of { imageUrl, blurHashUrl, position } (contiguous positions) */
@@ -67,10 +86,12 @@ function parseImages(value){
     const one = parseImage(value, 1);
     if (one.imageUrl || one.blurHashUrl) arr = [one];
   }
-  // Ensure positions are 1..N contiguous (if any images exist)
   if (arr.length) {
     arr = arr
-      .map((it, i) => ({ ...it, position: Number.isFinite(+it.position) ? toInt(it.position, i + 1) : (i + 1) }))
+      .map((it, i) => ({
+        ...it,
+        position: Number.isFinite(+it.position) ? toInt(it.position, i + 1) : (i + 1)
+      }))
       .sort((a,b) => a.position - b.position)
       .map((it, i) => ({ ...it, position: i + 1 }));
   }
@@ -153,7 +174,7 @@ export async function POST(req){
         unique_id:   uniqueId,
         title:       toStr(data?.product?.title, null) || null,
         description: toStr(data?.product?.description, null) || null,
-        keywords:    parseKeywords(data?.product?.keywords) // array
+        keywords:    parseKeywords(data?.product?.keywords)
       },
       variants:  Array.isArray(data?.variants)  ? data.variants  : [],
       inventory: Array.isArray(data?.inventory) ? data.inventory : [],

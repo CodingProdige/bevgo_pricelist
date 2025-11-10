@@ -59,18 +59,29 @@ function sanitizeUrl(u){
   return null;
 }
 
+// NEW: accept any non-empty string for blurhash (no URL validation)
+function sanitizeBlurHash(v){
+  if (v == null) return null;
+  const s = String(v).trim();
+  return s.length ? s : null;
+}
+
 function parseImage(input, fallbackPos = null){
   if (!input) return { imageUrl: null, blurHashUrl: null, ...(fallbackPos ? { position: fallbackPos } : {}) };
+
   if (typeof input === "string") {
     return { imageUrl: sanitizeUrl(input), blurHashUrl: null, ...(fallbackPos ? { position: fallbackPos } : {}) };
   }
+
   if (typeof input === "object"){
     const imageUrl    = sanitizeUrl(input.imageUrl ?? input.url);
-    const blurHashUrl = sanitizeUrl(input.blurHashUrl ?? input.blurhash ?? input.blurHash);
+    // CHANGED: use sanitizeBlurHash instead of sanitizeUrl
+    const blurHashUrl = sanitizeBlurHash(input.blurHashUrl ?? input.blurhash ?? input.blurHash);
     const pos = Number.isFinite(+input?.position) ? toInt(input.position, undefined) : undefined;
     const base = { imageUrl, blurHashUrl };
     return pos != null ? { ...base, position: pos } : (fallbackPos ? { ...base, position: fallbackPos } : base);
   }
+
   return { imageUrl: null, blurHashUrl: null, ...(fallbackPos ? { position: fallbackPos } : {}) };
 }
 
@@ -129,27 +140,24 @@ function sanitizePatch(patch){
   if (Object.prototype.hasOwnProperty.call(patch, "media")) {
     const m = patch.media || {};
     out.media = {};
-    if (Object.prototype.hasOwnProperty.call(m, "color")) out.media.color = toStr(m.color, null) || null;
-    if (Object.prototype.hasOwnProperty.call(m, "images")) out.media.images = parseImages(m.images);
-    if (Object.prototype.hasOwnProperty.call(m, "video")) out.media.video = toStr(m.video, null) || null;
-    if (Object.prototype.hasOwnProperty.call(m, "icon"))  out.media.icon  = toStr(m.icon,  null) || null;
+    if (Object.prototype.hasOwnProperty.call(m, "color"))  out.media.color  = toStr(m.color, null) || null;
+    if (Object.prototype.hasOwnProperty.call(m, "images")) out.media.images = parseImages(m.images); // keeps blurhash strings
+    if (Object.prototype.hasOwnProperty.call(m, "video"))  out.media.video  = toStr(m.video, null) || null;
+    if (Object.prototype.hasOwnProperty.call(m, "icon"))   out.media.icon   = toStr(m.icon,  null) || null;
   }
 
   if (Object.prototype.hasOwnProperty.call(patch, "product")) {
     const pr = patch.product || {};
     out.product = {};
-    if (Object.prototype.hasOwnProperty.call(pr, "unique_id")) out.product.unique_id = toStr(pr.unique_id);
-    if (Object.prototype.hasOwnProperty.call(pr, "title"))      out.product.title     = toStr(pr.title, null) || null;
-    if (Object.prototype.hasOwnProperty.call(pr, "description"))out.product.description= toStr(pr.description, null) || null;
-    if (Object.prototype.hasOwnProperty.call(pr, "keywords"))   out.product.keywords  = parseKeywords(pr.keywords);
+    if (Object.prototype.hasOwnProperty.call(pr, "unique_id"))  out.product.unique_id  = toStr(pr.unique_id);
+    if (Object.prototype.hasOwnProperty.call(pr, "title"))       out.product.title      = toStr(pr.title, null) || null;
+    if (Object.prototype.hasOwnProperty.call(pr, "description")) out.product.description= toStr(pr.description, null) || null;
+    if (Object.prototype.hasOwnProperty.call(pr, "keywords"))    out.product.keywords   = parseKeywords(pr.keywords);
   }
 
   if (Object.prototype.hasOwnProperty.call(patch, "inventory")) {
-    // Replace as-is but ensure it's an array
     out.inventory = Array.isArray(patch.inventory) ? patch.inventory : [];
   }
-
-  // variants are blocked in this endpoint; do not pass through
 
   return out;
 }
@@ -165,12 +173,10 @@ export async function POST(req) {
       return err(400, "Invalid Data", "Provide a 'data' object with fields to update.");
     }
 
-    // Block variant edits here (use dedicated endpoints)
     if (Object.prototype.hasOwnProperty.call(data, "variants")) {
       return err(400, "Variants Not Allowed Here", "Update variants via the variant endpoints.");
     }
 
-    // Enforce product.unique_id consistency if provided
     if (data?.product && Object.prototype.hasOwnProperty.call(data.product, "unique_id")) {
       const inc = toStr(data.product.unique_id);
       if (inc !== pid) {
@@ -178,24 +184,19 @@ export async function POST(req) {
       }
     }
 
-    // Load current doc
     const ref = doc(db, "products_v2", pid);
     const snap = await getDoc(ref);
     if (!snap.exists()) return err(404, "Product Not Found", `No product exists with unique_id ${pid}.`);
 
     const current = snap.data() || {};
+    const patch   = sanitizePatch(data);
+    const next    = deepMerge(current, patch);
 
-    // Sanitize only what was provided, then deep-merge (arrays replaced)
-    const patch = sanitizePatch(data);
-    const next  = deepMerge(current, patch);
-
-    // Persist + bump updatedAt
     await updateDoc(ref, {
       ...next,
       "timestamps.updatedAt": serverTimestamp(),
     });
 
-    // Re-read to return the exact stored doc
     const updatedSnap = await getDoc(ref);
     const updatedData = normalizeTimestamps(updatedSnap.data() || {});
     const product = { id: updatedSnap.id, ...updatedData };

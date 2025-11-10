@@ -3,57 +3,83 @@ import { NextResponse } from "next/server";
 import { db } from "@/lib/firebase";
 import { collection, getDocs } from "firebase/firestore";
 
+/* ----------------------------- helpers ----------------------------- */
+
 const ok  = (p = {}, s = 200) => NextResponse.json({ ok: true, ...p }, { status: s });
 const err = (s, t, m, e = {}) => NextResponse.json({ ok: false, title: t, message: m, ...e }, { status: s });
 
-const norm = (s) => String(s ?? "")
-  .toLowerCase()
-  .normalize("NFKC")
-  .replace(/\s+/g, " ")
-  .trim();
+const norm = (s) =>
+  String(s ?? "")
+    .toLowerCase()
+    .normalize("NFKC")
+    .replace(/\s+/g, " ")
+    .trim();
 
-/** Scan returnables and see if any data.returnable.slug equals target (case-insensitive) */
-async function slugTaken(targetSlugNorm, excludeSlugNorm = "") {
-  const snap = await getDocs(collection(db, "returnables"));
+/**
+ * Check if a slug is already taken within returnables_v2.
+ * Optionally exclude a given slug or document ID during edit.
+ */
+async function slugTaken(targetSlug, excludeSlug = "", excludeId = "") {
+  const snap = await getDocs(collection(db, "returnables_v2"));
   for (const d of snap.docs) {
-    const data = d.data() || {};
-    const rSlug = norm(data?.returnable?.slug);
+    const rid = d.id;
+    if (rid === excludeId) continue;
+
+    const rSlug = norm(d.data()?.returnable?.slug);
     if (!rSlug) continue;
-    if (excludeSlugNorm && rSlug === excludeSlugNorm) continue; // allow current slug during edits
-    if (rSlug === targetSlugNorm) return true;
+    if (excludeSlug && rSlug === excludeSlug) continue;
+
+    if (rSlug === targetSlug)
+      return { taken: true, conflict: { id: rid } };
   }
-  return false;
+  return { taken: false };
 }
+
+/* ----------------------------- GET ----------------------------- */
 
 export async function GET(req) {
   try {
     const { searchParams } = new URL(req.url);
     const slugRaw = searchParams.get("slug");
-    const excludeSlugRaw = searchParams.get("exclude_slug"); // optional
+    const excludeSlugRaw = searchParams.get("exclude_slug") || "";
+    const excludeId = searchParams.get("exclude_id") || "";
 
     const s = norm(slugRaw);
     const ex = norm(excludeSlugRaw);
 
-    if (!s) return err(400, "Missing Slug", "Provide 'slug' as a query parameter.");
+    if (!s)
+      return err(400, "Missing Slug", "Provide 'slug' as a query parameter.");
 
-    const taken = await slugTaken(s, ex);
-    return ok({ slug: slugRaw ?? "", available: !taken });
+    const { taken, conflict } = await slugTaken(s, ex, excludeId);
+    return ok({
+      slug: slugRaw ?? "",
+      available: !taken,
+      conflict: conflict ?? null,
+    });
   } catch (e) {
     console.error("returnables/slug-available GET failed:", e);
     return err(500, "Unexpected Error", "Failed to check slug availability.");
   }
 }
 
+/* ----------------------------- POST ----------------------------- */
+
 export async function POST(req) {
   try {
-    const { slug, exclude_slug } = await req.json();
-    const s = norm(slug);
-    const ex = norm(exclude_slug);
+    const body = await req.json().catch(() => ({}));
+    const s = norm(body.slug);
+    const ex = norm(body.exclude_slug);
+    const excludeId = body.exclude_id || "";
 
-    if (!s) return err(400, "Missing Slug", "Provide 'slug' in the JSON body.");
+    if (!s)
+      return err(400, "Missing Slug", "Provide 'slug' in the JSON body.");
 
-    const taken = await slugTaken(s, ex);
-    return ok({ slug: slug ?? "", available: !taken });
+    const { taken, conflict } = await slugTaken(s, ex, excludeId);
+    return ok({
+      slug: body.slug ?? "",
+      available: !taken,
+      conflict: conflict ?? null,
+    });
   } catch (e) {
     console.error("returnables/slug-available POST failed:", e);
     return err(500, "Unexpected Error", "Failed to check slug availability.");

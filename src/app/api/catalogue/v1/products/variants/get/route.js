@@ -14,9 +14,9 @@ export async function GET(req) {
 
     // Query params:
     // - unique_id (8-digit product id, optional if doing global variant lookup)
-    // - variant_unique_id (8-digit variant id, optional)
-    const pidRaw  = searchParams.get("unique_id");           // product id
-    const vidRaw  = searchParams.get("variant_unique_id");   // variant id
+    // - variant_id (8-digit variant id, optional)
+    const pidRaw  = searchParams.get("unique_id");         // product id
+    const vidRaw  = searchParams.get("variant_id");        // variant id
 
     const hasPid  = typeof pidRaw === "string" && pidRaw.trim().length > 0;
     const hasVid  = typeof vidRaw === "string" && vidRaw.trim().length > 0;
@@ -24,11 +24,11 @@ export async function GET(req) {
     const pid = hasPid ? pidRaw.trim() : "";
     const vid = hasVid ? vidRaw.trim() : "";
 
-    // -------- MODE A: Global lookup by variant_unique_id (no product id) --------
+    // -------- MODE A: Global lookup by variant_id (no product id) --------
     if (hasVid && !hasPid) {
-      if (!is8(vid)) return err(400, "Invalid Variant ID", "Query param 'variant_unique_id' must be an 8-digit string.");
+      if (!is8(vid)) return err(400, "Invalid Variant ID", "Query param 'variant_id' must be an 8-digit string.");
 
-      // Scan all products_v2 for a matching variant.unique_id
+      // Scan all products_v2 for a matching variants[].variant_id
       const rs = await getDocs(collection(db, "products_v2"));
 
       const matches = [];
@@ -37,18 +37,18 @@ export async function GET(req) {
         const variants = Array.isArray(pdata.variants) ? pdata.variants : [];
         for (let i = 0; i < variants.length; i++) {
           const v = variants[i] || {};
-          if (String(v?.unique_id ?? "") === vid) {
+          if (String(v?.variant_id ?? "") === vid) {
             matches.push({ unique_id: d.id, variant_index: i, variant: v });
           }
         }
       }
 
       if (matches.length === 0) {
-        return err(404, "Variant Not Found", `No variant found with unique_id '${vid}'.`);
+        return err(404, "Variant Not Found", `No variant found with variant_id '${vid}'.`);
       }
       if (matches.length > 1) {
-        // Should never happen if you enforce global uniqueness on variant.unique_id
-        return err(409, "Variant ID Not Unique", `Multiple variants share unique_id '${vid}'.`);
+        // Should never happen if you enforce global uniqueness on variant.variant_id
+        return err(409, "Variant ID Not Unique", `Multiple variants share variant_id '${vid}'.`);
       }
 
       return ok(matches[0]);
@@ -69,13 +69,13 @@ export async function GET(req) {
     const data = snap.data() || {};
     const variants = Array.isArray(data.variants) ? data.variants : [];
 
-    // -------- MODE B: Variant lookup within product by variant_unique_id --------
+    // -------- MODE B: Variant lookup within product by variant_id --------
     if (hasVid) {
-      if (!is8(vid)) return err(400, "Invalid Variant ID", "Query param 'variant_unique_id' must be an 8-digit string.");
+      if (!is8(vid)) return err(400, "Invalid Variant ID", "Query param 'variant_id' must be an 8-digit string.");
 
-      const index = variants.findIndex(v => String(v?.unique_id ?? "") === vid);
+      const index = variants.findIndex(v => String(v?.variant_id ?? "") === vid);
       if (index < 0) {
-        return err(404, "Variant Not Found", `No variant with unique_id '${vid}' on this product.`);
+        return err(404, "Variant Not Found", `No variant with variant_id '${vid}' on this product.`);
       }
 
       return ok({
@@ -93,7 +93,7 @@ export async function GET(req) {
     });
 
   } catch (e) {
-    console.error("variants/list failed:", e);
+    console.error("products_v2/variants/list failed:", e);
     return err(500, "Unexpected Error", "Something went wrong while fetching variants.");
   }
 }

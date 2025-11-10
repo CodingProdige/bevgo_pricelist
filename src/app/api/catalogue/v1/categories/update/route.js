@@ -1,7 +1,8 @@
-// app/api/catalogue/v1/categories/update/route.js
 import { NextResponse } from "next/server";
 import { db } from "@/lib/firebase";
-import { collection, doc, getDoc, getDocs, setDoc, deleteDoc, serverTimestamp } from "firebase/firestore";
+import {
+  collection, doc, getDoc, getDocs, updateDoc, setDoc, deleteDoc, serverTimestamp
+} from "firebase/firestore";
 
 const ok  =(p={},s=200)=>NextResponse.json({ ok:true, ...p },{ status:s });
 const err =(s,t,m,e={})=>NextResponse.json({ ok:false, title:t, message:m, ...e },{ status:s });
@@ -28,6 +29,7 @@ function parseKeywords(v){
     .filter((v,i,a)=>a.indexOf(v)===i)
     .slice(0,100);
 }
+
 function parseImage(input, fallbackPos){
   const base = { imageUrl:null, blurHashUrl:null, position:null };
   if (!input) return { ...base, position:fallbackPos };
@@ -37,6 +39,7 @@ function parseImage(input, fallbackPos){
   const p = Number.isFinite(+input.position)&&+input.position>0 ? Math.trunc(+input.position) : fallbackPos;
   return { imageUrl, blurHashUrl, position:p };
 }
+
 function parseImages(v){
   if (!v) return [];
   const arr = Array.isArray(v)? v : [v];
@@ -47,6 +50,7 @@ function parseImages(v){
   let cur=max;
   return mapped.map(im=> (Number.isFinite(+im.position)&&+im.position>0)? im : ({...im, position:++cur}));
 }
+
 function deepMerge(target, patch){
   if (patch==null || typeof patch!=="object") return target;
   const out = Array.isArray(target)? [...target] : { ...target };
@@ -59,6 +63,7 @@ function deepMerge(target, patch){
   }
   return out;
 }
+
 const tsToIso = v => v && typeof v?.toDate==="function" ? v.toDate().toISOString() : v ?? null;
 const normalizeTimestamps = doc => !doc||typeof doc!=="object"? doc : ({
   ...doc,
@@ -67,19 +72,19 @@ const normalizeTimestamps = doc => !doc||typeof doc!=="object"? doc : ({
 
 export async function POST(req){
   try{
-    const { id, data, allow_slug_regen = false } = await req.json();
+    const { id, data } = await req.json();
 
-    const currId = String(id ?? "").trim();
-    if (!currId) return err(400,"Invalid Id","Provide current 'id' (existing category slug).");
+    const currId = String(id ?? "").trim(); // Firestore doc ID (auto id in your setup)
+    if (!currId) return err(400,"Invalid Id","Provide current 'id' (existing category doc id).");
     if (!data || typeof data!=="object") return err(400,"Invalid Data","Provide a 'data' object with fields to update.");
 
-    // Load current
+    // Load current doc
     const currRef = doc(db,"categories", currId);
     const currSnap = await getDoc(currRef);
     if (!currSnap.exists()) return err(404,"Not Found",`No category with id '${currId}'.`);
     const current = currSnap.data()||{};
 
-    // Pre-sanitize parts
+    // Normalize parts
     if (data?.category && Object.prototype.hasOwnProperty.call(data.category,"keywords")){
       data.category.keywords = parseKeywords(data.category.keywords);
     }
@@ -94,25 +99,10 @@ export async function POST(req){
       next.category = deepMerge(current.category||{}, rest.category);
     }
 
-    // Enforce unique title (excluding current)
+    // Enforce unique title (excluding current doc)
     const newTitle = String(next?.category?.title ?? "").trim();
     if (await titleExists(titleKey(newTitle), currId)) {
       return err(409,"Duplicate Title","A category with the same title already exists.");
-    }
-
-    // Slug handling
-    let targetSlug = currId;
-    const requestedSlug = String(data?.category?.slug ?? "").trim();
-    if (allow_slug_regen && requestedSlug){
-      if (requestedSlug !== currId){
-        // ensure requested slug unused
-        const targetRef = doc(db,"categories", requestedSlug);
-        const targetSnap = await getDoc(targetRef);
-        if (targetSnap.exists()) return err(409,"Category Exists",`A category with slug '${requestedSlug}' already exists.`);
-        targetSlug = requestedSlug;
-      }
-    } else if (requestedSlug && requestedSlug !== currId){
-      return err(409,"Slug Immutable","Slug cannot be changed unless 'allow_slug_regen' is true.");
     }
 
     // Normalize placement.position
@@ -120,8 +110,7 @@ export async function POST(req){
       ? Math.trunc(+next.placement.position)
       : (Number.isFinite(+current?.placement?.position) ? Math.trunc(+current.placement.position) : 1);
 
-    next.docId = targetSlug;
-    next.category = { ...(next.category||{}), slug: targetSlug };
+    next.docId = currId; // keep actual Firestore document id here
     next.placement = { ...(next.placement||{}), position: pos };
     next.timestamps = {
       ...(current.timestamps||{}),
@@ -129,21 +118,46 @@ export async function POST(req){
       createdAt: current?.timestamps?.createdAt ?? serverTimestamp()
     };
 
-    if (targetSlug === currId){
-      await setDoc(currRef, next, { merge:false });
-      const saved = await getDoc(currRef);
-      return ok({ message:"Category updated.", id:saved.id, data: normalizeTimestamps(saved.data()||{}) });
+    // Detect slug change and keep old/new around for propagation
+    const oldSlug = String(current?.category?.slug ?? "").trim();
+    const newSlug = String(next?.category?.slug ?? oldSlug).trim();
+    const slugChanged = !!(oldSlug && newSlug && oldSlug !== newSlug);
+
+    // Save category first
+    await setDoc(currRef, next, { merge:false });
+
+    // If slug changed → propagate to dependent collections (ALL IN MEMORY, no indexes)
+    let touched = null;
+    if (slugChanged){
+      touched = { sub_categories:0, brands:0, products_v2:0, returnables:0 };
+
+      const batches = [
+        { col: "sub_categories", path: "grouping.category" },
+        { col: "brands",         path: "grouping.category" },
+        { col: "products_v2",    path: "grouping.category" },
+        { col: "returnables",    path: "grouping.category" },
+      ];
+
+      for (const { col, path } of batches){
+        const snap = await getDocs(collection(db, col));
+        const rows = snap.docs.map(d => ({ id: d.id, data: d.data() || {} }));
+        const toUpdate = rows.filter(r => String(r.data?.grouping?.category || "") === oldSlug);
+
+        // update sequentially to keep it simple (still all in-memory)
+        for (const r of toUpdate){
+          await updateDoc(doc(db, col, r.id), { [path]: newSlug });
+          touched[col] += 1;
+        }
+      }
     }
 
-    const newRef = doc(db,"categories", targetSlug);
-    await setDoc(newRef, next, { merge:false });
-    await deleteDoc(currRef);
-    const moved = await getDoc(newRef);
+    // Return updated, normalized doc + propagation summary
+    const saved = await getDoc(currRef);
     return ok({
-      message:"Category updated (slug changed).",
-      id: moved.id,
-      previous_id: currId,
-      data: normalizeTimestamps(moved.data()||{})
+      message: slugChanged ? "Category updated (slug propagated)." : "Category updated.",
+      id: saved.id,
+      data: normalizeTimestamps(saved.data()||{}),
+      ...(slugChanged ? { propagation: { from: oldSlug, to: newSlug, touched } } : {})
     });
   }catch(e){
     console.error("categories/update failed:", e);

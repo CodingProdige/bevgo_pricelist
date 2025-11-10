@@ -21,12 +21,12 @@ export async function POST(req){
     const newPos = Math.max(1, parseInt(position,10) || 1);
 
     // Ensure target exists
-    const targetRef = doc(db,"returnables", rid);
+    const targetRef = doc(db,"returnables_v2", rid);
     const targetSnap = await getDoc(targetRef);
     if (!targetSnap.exists()) return err(404,"Not Found",`No returnable with id '${rid}'.`);
 
     // Load ALL returnables (in memory)
-    const rs = await getDocs(collection(db,"returnables"));
+    const rs = await getDocs(collection(db,"returnables_v2"));
     if (rs.empty) return err(409,"No Returnables","There are no returnables to reorder.");
 
     // Build an ordered list by placement.position asc (missing -> Infinity)
@@ -60,7 +60,7 @@ export async function POST(req){
       part.forEach((id, iPartIdx) => {
         const absoluteIdx = arr.indexOf(id); // pos in full array
         const pos = absoluteIdx + 1;
-        batch.update(doc(db,"returnables", id), {
+        batch.update(doc(db,"returnables_v2", id), {
           "placement.position": pos,
           "timestamps.updatedAt": serverTimestamp()
         });

@@ -1,30 +1,24 @@
 /**
- * NAME: Soft Delete Product
+ * NAME: Delete Product (hard delete)
  * PATH: /api/products_v2/delete
  * METHOD: POST
  *
  * PURPOSE:
- *   - Soft-delete a product by disabling it instead of removing the document.
+ *   - Permanently delete a product document from Firestore.
+ *   - No cascading deletes/updates are performed here.
  *
  * INPUTS (Body JSON):
  *   - unique_id (string, required): 8-digit product id (Firestore doc id)
  *
- * SIDE EFFECTS:
- *   - Updates the document at products_v2/{unique_id}:
- *       placement.isActive = false
- *       placement.isFeatured = false
- *       deletedAt = serverTimestamp()
- *       timestamps.updatedAt = serverTimestamp()
- *
  * RESPONSE:
- *   - 200: { ok: true, unique_id, message: "Product soft-deleted." }
+ *   - 200: { ok: true, unique_id, message: "Product permanently deleted." }
  *   - 404: { ok: false, title: "Product Not Found", message: "..." }
  *   - 400/500: { ok: false, title, message }
  */
 
 import { NextResponse } from "next/server";
 import { db } from "@/lib/firebase";
-import { doc, getDoc, updateDoc, serverTimestamp } from "firebase/firestore";
+import { doc, getDoc, deleteDoc } from "firebase/firestore";
 
 /* helpers */
 const ok  = (payload = {}, status = 200) => NextResponse.json({ ok: true, ...payload }, { status });
@@ -46,16 +40,11 @@ export async function POST(req) {
       return err(404, "Product Not Found", `No product exists with unique_id ${pid}.`);
     }
 
-    await updateDoc(ref, {
-      "placement.isActive": false,
-      "placement.isFeatured": false,
-      deletedAt: serverTimestamp(),
-      "timestamps.updatedAt": serverTimestamp(),
-    });
+    await deleteDoc(ref);
 
-    return ok({ unique_id: pid, message: "Product soft-deleted." });
+    return ok({ unique_id: pid, message: "Product permanently deleted." });
   } catch (e) {
-    console.error("products_v2/delete (soft) failed:", e);
-    return err(500, "Unexpected Error", "Something went wrong while soft-deleting the product.");
+    console.error("products_v2/delete (hard) failed:", e);
+    return err(500, "Unexpected Error", "Something went wrong while deleting the product.");
   }
 }

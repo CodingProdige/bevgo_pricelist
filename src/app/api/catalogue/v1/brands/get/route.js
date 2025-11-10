@@ -1,4 +1,26 @@
 // app/api/brands/get/route.js
+/**
+ * NAME: Get Brand(s)
+ * PATH: /api/brands/get
+ * METHOD: GET
+ *
+ * QUERY (all optional; empty/"null"/"undefined" are treated as omitted):
+ *   - id (string): fetch by document id
+ *   - slug (string): fetch by slug (must match exactly one)
+ *   - category (string)
+ *   - subCategory (string)
+ *   - brand (string)   // matches brand.slug OR brand.title (case-insensitive)
+ *   - isActive (bool-ish)
+ *   - isFeatured (bool-ish)
+ *   - limit (number | "all")   // default 24; "all" = no cap
+ *   - group_by ("category" | "subcategory")
+ *
+ * RESPONSES:
+ *   - Single: { ok:true, id, data }
+ *   - List:   { ok:true, count, items:[{ id, data }...] }
+ *   - Grouped:{ ok:true, count, groups:[{ key, items:[...] }...] }
+ */
+
 import { NextResponse } from "next/server";
 import { db } from "@/lib/firebase";
 import {
@@ -12,79 +34,64 @@ const toBool=(v)=>{
   if (typeof v==="boolean") return v;
   if (v==null) return null;
   const s=String(v).toLowerCase();
-  if (["true","1","yes"].includes(s)) return true;
-  if (["false","0","no"].includes(s)) return false;
+  if (["true","1","yes"].includes(s))  return true;
+  if (["false","0","no"].includes(s))  return false;
   return null;
 };
 
-// normalize timestamps if you ever add them later, but brands schema
-// didn't include timestamps so we leave that out for now
+// Treat "", "null", "undefined" as omitted
+const clean = (v) => {
+  const s = String(v ?? "").trim();
+  if (!s) return "";
+  const low = s.toLowerCase();
+  if (low === "null" || low === "undefined") return "";
+  return s;
+};
 
-// Inclusive grouping matcher for brands, similar to products:
-// - Filters: category, subCategory, brandName
-// - A brand doc can look like:
-//    data.grouping.category            (string)
-//    data.grouping.subCategories       (array of strings)
-//    data.brand.slug / data.brand.title (brand identity)
-// Matching rules:
-// 1. If a filter is provided and the doc explicitly conflicts, exclude.
-//    e.g. you ask for category "water" and doc.category is "soft-drinks" -> drop.
-// 2. If any of the provided filters positively matches one of the doc's groupings/identity, include.
-// 3. If you provided at least one filter but none matched, exclude.
-// 4. If you provided no filters, include everything.
+/**
+ * Inclusive grouping matcher for brands (mirrors products/sub-categories logic):
+ * - Hard conflicts exclude: when a doc explicitly declares a grouping that contradicts a provided filter.
+ * - Otherwise, require at least one positive match among provided filters.
+ */
 function matchesGrouping(brandData, { category, subCategory, brandName }) {
   const g = brandData?.grouping || {};
-  const bInfo = brandData?.brand || {};
+  const b = brandData?.brand || {};
 
-  const docCategory = g.category || null;
-  const docSubs = Array.isArray(g.subCategories) ? g.subCategories : [];
-  const docBrandSlug = (bInfo.slug ?? "").trim();
-  const docBrandTitle = (bInfo.title ?? "").trim();
+  const docCategory   = g.category || null;
+  const docSubs       = Array.isArray(g.subCategories) ? g.subCategories : [];
+  const docBrandSlug  = (b.slug  ?? "").trim();
+  const docBrandTitle = (b.title ?? "").trim();
 
   // --- hard conflicts ---
-  if (category && docCategory && docCategory !== category) {
-    return false;
-  }
-  if (subCategory && docSubs.length > 0 && !docSubs.includes(subCategory)) {
-    // if subCategory filter is provided and brand *does* declare subCategories,
-    // and the filter is NOT in that list, it's a conflict
-    return false;
-  }
+  if (category && docCategory && docCategory !== category) return false;
+  if (subCategory && docSubs.length > 0 && !docSubs.includes(subCategory)) return false;
   if (brandName) {
-    // brandName can match slug or title; conflict if both exist and neither matches
-    if (
-      (docBrandSlug || docBrandTitle) &&
-      docBrandSlug.toLowerCase() !== brandName.toLowerCase() &&
-      docBrandTitle.toLowerCase() !== brandName.toLowerCase()
-    ) {
-      return false;
-    }
+    const bn = brandName.toLowerCase();
+    const slugMatch  = docBrandSlug.toLowerCase()  === bn;
+    const titleMatch = docBrandTitle.toLowerCase() === bn;
+    if ((docBrandSlug || docBrandTitle) && !(slugMatch || titleMatch)) return false;
   }
 
-  // Did caller provide any grouping-ish filters?
   const anyFilterProvided = !!(category || subCategory || brandName);
 
-  // Any positive match?
   const catMatch =
     category && docCategory === category;
 
   const subMatch =
     subCategory && (
       docSubs.includes(subCategory) ||
-      // tolerant fallback: if brand didn't declare subs at all, treat that as "not blocking"
-      (docSubs.length === 0)
+      (docSubs.length === 0) // tolerant when brand didn’t declare subs
     );
 
+  const bn = brandName?.toLowerCase() || "";
   const brandMatch =
-    brandName &&
-    (
-      docBrandSlug.toLowerCase() === brandName.toLowerCase() ||
-      docBrandTitle.toLowerCase() === brandName.toLowerCase()
+    brandName && (
+      docBrandSlug.toLowerCase() === bn ||
+      docBrandTitle.toLowerCase() === bn
     );
 
   const anyPositiveMatch = !!(catMatch || subMatch || brandMatch);
 
-  // If filters were sent, require at least one positive match
   return anyFilterProvided ? anyPositiveMatch : true;
 }
 
@@ -92,12 +99,9 @@ export async function GET(req){
   try{
     const { searchParams } = new URL(req.url);
 
-    // --- Direct lookups first ---
-    const byIdRaw   = (searchParams.get("id")||"").trim();
-    const bySlugRaw = (searchParams.get("slug")||"").trim();
-
-    const byId   = byIdRaw && byIdRaw.toLowerCase()!=="null" ? byIdRaw : "";
-    const bySlug = bySlugRaw && bySlugRaw.toLowerCase()!=="null" ? bySlugRaw : "";
+    // --- Direct lookups first (omit empty/"null"/"undefined") ---
+    const byId   = clean(searchParams.get("id"));
+    const bySlug = clean(searchParams.get("slug"));
 
     if (byId){
       const ref = doc(db,"brands", byId);
@@ -107,42 +111,26 @@ export async function GET(req){
     }
 
     if (bySlug){
-      // in-memory slug lookup: load all, then find exact slug match
+      // in-memory slug lookup
       const allSnap = await getDocs(collection(db,"brands"));
-      const allRows = allSnap.docs.map(d=>({ id:d.id, data:d.data()||{} }));
-      const hits = allRows.filter(row => {
-        const slug = String(row.data?.brand?.slug ?? "").trim().toLowerCase();
-        return slug && slug === bySlug.toLowerCase();
-      });
-
-      if (hits.length === 0){
-        return err(404,"Not Found",`No brand with slug '${bySlug}'.`);
-      }
-      if (hits.length > 1){
-        return err(409,"Slug Not Unique",`Multiple brands share slug '${bySlug}'.`);
-      }
+      const rows = allSnap.docs.map(d=>({ id:d.id, data:d.data()||{} }));
+      const hits = rows.filter(row =>
+        String(row.data?.brand?.slug ?? "").trim().toLowerCase() === bySlug.toLowerCase()
+      );
+      if (hits.length === 0)  return err(404,"Not Found",`No brand with slug '${bySlug}'.`);
+      if (hits.length > 1)    return err(409,"Slug Not Unique",`Multiple brands share slug '${bySlug}'.`);
       return ok({ id: hits[0].id, data: hits[0].data });
     }
 
     // --- List mode ---
-    // pull raw params
-    const rawCategory    = (searchParams.get("category")||"").trim();
-    const rawSubCategory = (searchParams.get("subCategory")||"").trim();
-    const rawBrandName   = (searchParams.get("brand")||"").trim();
-    const rawIsActive    = searchParams.get("isActive");
-    const rawIsFeatured  = searchParams.get("isFeatured");
-    const rawGroupBy     = (searchParams.get("group_by")||"").trim().toLowerCase(); // "category"|"subcategory"|""
-    const rawLimit       = (searchParams.get("limit")||"24").trim().toLowerCase();
+    const category    = clean(searchParams.get("category"));
+    const subCategory = clean(searchParams.get("subCategory"));
+    const brandName   = clean(searchParams.get("brand"));
+    const isActive    = toBool(clean(searchParams.get("isActive")));
+    const isFeatured  = toBool(clean(searchParams.get("isFeatured")));
+    const groupBy     = clean(searchParams.get("group_by")).toLowerCase(); // "category"|"subcategory"|""
+    const rawLimit    = clean(searchParams.get("limit")).toLowerCase() || "24";
 
-    // normalize "null" / "" to nothing
-    const category    = rawCategory && rawCategory.toLowerCase()!=="null" ? rawCategory : "";
-    const subCategory = rawSubCategory && rawSubCategory.toLowerCase()!=="null" ? rawSubCategory : "";
-    const brandName   = rawBrandName && rawBrandName.toLowerCase()!=="null" ? rawBrandName : "";
-
-    const isActive   = toBool(rawIsActive);
-    const isFeatured = toBool(rawIsFeatured);
-
-    // limit handling like products
     const unlimited = rawLimit === "all";
     let lim = null;
     if (!unlimited){
@@ -150,35 +138,25 @@ export async function GET(req){
       lim = (Number.isFinite(n) && n>0) ? n : 24;
     }
 
-    // 1) load whole collection in memory
+    // 1) load whole collection (no indexes/orderBy)
     const snapAll = await getDocs(collection(db,"brands"));
     let items = snapAll.docs.map(d=>({ id:d.id, data:d.data()||{} }));
 
-    // 2) in-memory filters
+    // 2) in-memory filters with inclusive matcher
     items = items.filter(row => {
       const b = row.data;
-
-      // inclusive category/subCategory/brandName logic
       if (!matchesGrouping(b, { category, subCategory, brandName })) return false;
 
-      if (isActive !== null) {
-        if (!!b?.placement?.isActive !== isActive) return false;
-      }
-      if (isFeatured !== null) {
-        if (!!b?.placement?.isFeatured !== isFeatured) return false;
-      }
+      if (isActive !== null && !!b?.placement?.isActive   !== isActive)   return false;
+      if (isFeatured !== null && !!b?.placement?.isFeatured !== isFeatured) return false;
 
       return true;
     });
 
-    // 3) sort by placement.position asc, missing -> Infinity (goes last)
+    // 3) sort by placement.position asc, missing -> Infinity
     items.sort((a,b)=>{
-      const ap = Number.isFinite(+a.data?.placement?.position)
-        ? +a.data.placement.position
-        : Number.POSITIVE_INFINITY;
-      const bp = Number.isFinite(+b.data?.placement?.position)
-        ? +b.data.placement.position
-        : Number.POSITIVE_INFINITY;
+      const ap = Number.isFinite(+a.data?.placement?.position) ? +a.data.placement.position : Number.POSITIVE_INFINITY;
+      const bp = Number.isFinite(+b.data?.placement?.position) ? +b.data.placement.position : Number.POSITIVE_INFINITY;
       return ap - bp;
     });
 
@@ -190,7 +168,7 @@ export async function GET(req){
     const count = items.length;
 
     // 5) optional grouping
-    if (rawGroupBy === "category"){
+    if (groupBy === "category"){
       const map = new Map();
       for (const it of items){
         const key = String(it.data?.grouping?.category ?? "unknown");
@@ -203,12 +181,10 @@ export async function GET(req){
       return ok({ count, groups });
     }
 
-    if (rawGroupBy === "subcategory"){
+    if (groupBy === "subcategory"){
       const map = new Map();
       for (const it of items){
-        const subs = Array.isArray(it.data?.grouping?.subCategories)
-          ? it.data.grouping.subCategories
-          : ["(none)"];
+        const subs = Array.isArray(it.data?.grouping?.subCategories) ? it.data.grouping.subCategories : ["(none)"];
         for (const sc of subs){
           const key = String(sc || "(none)");
           if (!map.has(key)) map.set(key, []);

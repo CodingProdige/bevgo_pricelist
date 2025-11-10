@@ -48,7 +48,7 @@ async function collectExistingCodes() {
 
     // returnables: docId (d.id) + returnable.returnable_id
     {
-      const rsnap = await getDocs(collection(db, "returnables"));
+      const rsnap = await getDocs(collection(db, "returnables_v2"));
       for (const d of rsnap.docs) {
         const data = d.data() || {};
         const docId = String(d.id).trim();

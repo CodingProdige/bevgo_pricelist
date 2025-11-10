@@ -1,4 +1,3 @@
-// app/api/returnables/create/route.js
 import { NextResponse } from "next/server";
 import { db } from "@/lib/firebase";
 import {
@@ -26,12 +25,12 @@ const slugify = (s)=> String(s??"")
   .replace(/[^a-zA-Z0-9]+/g,"-").replace(/^-+|-+$/g,"").toLowerCase();
 
 async function nextPosition(){
-  const snap = await getCountFromServer(collection(db,"returnables"));
+  const snap = await getCountFromServer(collection(db,"returnables_v2"));
   return (snap.data().count || 0) + 1;
 }
 
 async function slugExists(slug){
-  const snap = await getDocs(collection(db,"returnables"));
+  const snap = await getDocs(collection(db,"returnables_v2"));
   for (const d of snap.docs){
     const s = String(d.data()?.returnable?.slug ?? "").trim().toLowerCase();
     if (s && s === String(slug).toLowerCase()) return true;
@@ -73,7 +72,7 @@ export async function POST(req){
     slug = slugify(slug);
 
     // uniqueness checks
-    const ref = doc(db,"returnables", rid);
+    const ref = doc(db,"returnables_v2", rid);
     const exist = await getDoc(ref);
     if (exist.exists()) return err(409,"Returnable Exists",`A returnable with id '${rid}' already exists.`);
     if (await slugExists(slug)) return err(409,"Duplicate Slug",`A returnable with slug '${slug}' already exists.`);
@@ -90,9 +89,8 @@ export async function POST(req){
         ? Math.trunc(+data.placement.position)
         : await nextPosition();
 
-    // build body to match your schema
     const body = {
-      docId: rid, // == returnable_id
+      docId: rid,
       returnable: {
         returnable_id: rid,
         title: String(data?.returnable?.title ?? "").trim(),
@@ -123,7 +121,7 @@ export async function POST(req){
     return ok({ message:"Returnable created.", id:saved.id, data:dataOut }, 201);
 
   }catch(e){
-    console.error("returnables/create failed:", e);
+    console.error("returnables_v2/create failed:", e);
     return err(500,"Unexpected Error","Something went wrong while creating the returnable.");
   }
 }
