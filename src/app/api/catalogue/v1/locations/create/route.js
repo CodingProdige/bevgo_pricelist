@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/firebase";
-import { collection, doc, getDocs, getDoc, setDoc, serverTimestamp, where } from "firebase/firestore";
+import { collection, doc, getDocs, getDoc, setDoc, serverTimestamp } from "firebase/firestore";
 
 /* ---------------- response helpers ---------------- */
 const ok  =(p={},s=201)=>NextResponse.json({ok:true,...p},{status:s});
@@ -13,6 +13,50 @@ const toBool=(v,f=false)=>typeof v==="boolean"?v:
   typeof v==="string"?["true","1","yes","y"].includes(v.toLowerCase()):f;
 const toInt =(v,f=0)=>Number.isFinite(+v)?Math.trunc(+v):f;
 const toNum =(v,f=0)=>Number.isFinite(+v)?+v:f;
+
+/* ---------------- util: parse images ---------------- */
+function sanitizeUrl(u){
+  if (u == null) return null;
+  const s = String(u).trim();
+  if (!s) return null;
+  if (/^(https?:\/\/|data:)/i.test(s)) return s;
+  return null;
+}
+function sanitizeBlurHash(v){
+  if (v == null) return null;
+  const s = String(v).trim();
+  return s.length ? s : null;
+}
+function parseImage(input, fallbackPos = null){
+  if (!input) return { imageUrl: null, blurHashUrl: null, ...(fallbackPos ? { position: fallbackPos } : {}) };
+  if (typeof input === "string") {
+    return { imageUrl: sanitizeUrl(input), blurHashUrl: null, ...(fallbackPos ? { position: fallbackPos } : {}) };
+  }
+  if (typeof input === "object"){
+    const imageUrl    = sanitizeUrl(input.imageUrl ?? input.url);
+    const blurHashUrl = sanitizeBlurHash(input.blurHashUrl ?? input.blurhash ?? input.blurHash);
+    const pos = Number.isFinite(+input?.position) ? toInt(input.position, undefined) : undefined;
+    const base = { imageUrl, blurHashUrl };
+    return pos != null ? { ...base, position: pos } : (fallbackPos ? { ...base, position: fallbackPos } : base);
+  }
+  return { imageUrl: null, blurHashUrl: null, ...(fallbackPos ? { position: fallbackPos } : {}) };
+}
+function parseImages(value){
+  let arr = [];
+  if (Array.isArray(value)) {
+    arr = value.map((v, i) => parseImage(v, i + 1)).filter(o => o.imageUrl || o.blurHashUrl);
+  } else if (value) {
+    const one = parseImage(value, 1);
+    if (one.imageUrl || one.blurHashUrl) arr = [one];
+  }
+  if (arr.length) {
+    arr = arr
+      .map((it, i) => ({ ...it, position: Number.isFinite(+it.position) ? toInt(it.position, i + 1) : (i + 1) }))
+      .sort((a,b) => a.position - b.position)
+      .map((it, i) => ({ ...it, position: i + 1 }));
+  }
+  return arr;
+}
 
 /* ---------------- util: get next position ---------------- */
 async function nextPosition(colRef){
@@ -55,16 +99,15 @@ export async function POST(req){
         line1:toStr(data?.address?.line1,null)||null,
         city:toStr(data?.address?.city,null)||null,
         province:toStr(data?.address?.province,null)||null,
-        postal_code:toStr(data?.address?.postal_code,null)||null,
-        coordinates:{
-          lat:toNum(data?.address?.coordinates?.lat,null),
-          lng:toNum(data?.address?.coordinates?.lng,null)
-        }
+        postal_code:toStr(data?.address?.postal_code,null)||null
       },
       contact:{
         name:toStr(data?.contact?.name,null)||null,
         phone:toStr(data?.contact?.phone,null)||null,
         email:toStr(data?.contact?.email,null)||null
+      },
+      media:{
+        images: parseImages(data?.media?.images)
       },
       placement:{
         isActive:toBool(data?.placement?.isActive,true),
