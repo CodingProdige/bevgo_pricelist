@@ -1,195 +1,202 @@
+// app/api/catalogue/v1/products/utils/updateVariant/route.js
 import { NextResponse } from "next/server";
 import { db } from "@/lib/firebase";
-import { doc, getDoc, updateDoc, serverTimestamp } from "firebase/firestore";
+import { collection, getDocs, doc, getDoc, updateDoc, serverTimestamp } from "firebase/firestore";
 
-/* ---------- response helpers ---------- */
-const ok  = (p = {}, s = 200) => NextResponse.json({ ok: true, ...p }, { status: s });
-const err = (s, t, m, e = {}) => NextResponse.json({ ok: false, title: t, message: m, ...e }, { status: s });
+/* ---------- helpers ---------- */
+const ok  =(p={},s=200)=>NextResponse.json({ok:true,...p},{status:s});
+const err =(s,t,m,e={})=>NextResponse.json({ok:false,title:t,message:m,...e},{status:s});
 
-/* ---------- type sanitizers ---------- */
-const money2 = (v) => Number.isFinite(+v) ? Math.round(+v * 100) / 100 : 0;
-const toInt  = (v, f = 0) => Number.isFinite(+v) ? Math.trunc(+v) : f;
-const toNum  = (v, f = 0) => Number.isFinite(+v) ? +v : f;
-const toStr  = (v, f = "") => (v == null ? f : String(v)).trim();
-const toBool = (v, f = false) =>
-  typeof v === "boolean" ? v
-  : typeof v === "number" ? v !== 0
-  : typeof v === "string" ? ["true","1","yes","y"].includes(v.toLowerCase())
-  : f;
+const money2=(v)=>Number.isFinite(+v)?Math.round(+v*100)/100:0;
+const toInt=(v,f=0)=>Number.isFinite(+v)?Math.trunc(+v):f;
+const toNum=(v,f=0)=>Number.isFinite(+v)?+v:f;
+const toStr=(v,f="")=>(v==null?f:String(v)).trim();
+const toBool=(v,f=false)=>
+  typeof v==="boolean"?v:
+  typeof v==="number"?v!==0:
+  typeof v==="string"?["true","1","yes","y"].includes(v.toLowerCase()):
+  f;
+const is8=(s)=>/^\d{8}$/.test(String(s??"").trim());
 
-const is8 = (s) => /^\d{8}$/.test(String(s ?? "").trim());
+async function collectAllBarcodes() {
+  const snap = await getDocs(collection(db,"products_v2"));
+  const list = [];
+  for (const d of snap.docs) {
+    const pid = d.id;
+    const data = d.data() || {};
+    const variants = Array.isArray(data?.variants) ? data.variants : [];
+    for (const v of variants) {
+      const bc = String(v?.barcode ?? "").trim().toUpperCase();
+      const vId = String(v?.variant_id ?? "").trim();
+      if (bc) list.push({ productId: pid, variantId: vId, barcode: bc });
+    }
+  }
+  return list;
+}
 
-/** Deep-merge objects; arrays are replaced */
-function deepMerge(target, patch) {
-  if (patch == null || typeof patch !== "object") return target;
-  const out = Array.isArray(target) ? [...target] : { ...target };
-  for (const [k, v] of Object.entries(patch)) {
-    if (v && typeof v === "object" && !Array.isArray(v) && typeof out[k] === "object" && !Array.isArray(out[k])) {
-      out[k] = deepMerge(out[k], v);
-    } else {
-      out[k] = v; // replace primitives & arrays
+function deepMerge(target,patch){
+  if(patch==null||typeof patch!=="object")return target;
+  const out=Array.isArray(target)?[...target]:{...target};
+  for(const[k,v]of Object.entries(patch)){
+    if(v&&typeof v==="object"&&!Array.isArray(v)&&typeof out[k]==="object"&&!Array.isArray(out[k])){
+      out[k]=deepMerge(out[k],v);
+    }else{
+      out[k]=v;
     }
   }
   return out;
 }
 
-/** Sanitize a partial patch into correct types — only for provided keys. */
-function sanitizePatch(patch) {
-  const out = {};
+/** Sanitize inventory array (replaces full array) */
+function parseInventory(arr) {
+  if (!Array.isArray(arr)) return [];
+  return arr
+    .filter(it => it && typeof it === "object")
+    .map(it => ({
+      in_stock_qty: toInt(it.in_stock_qty, 0),
+      warehouse_id: toStr(it.warehouse_id, null) || null
+    }))
+    .filter(it => it.warehouse_id !== null);
+}
 
-  if (Object.prototype.hasOwnProperty.call(patch, "sku"))   out.sku   = toStr(patch.sku);
-  if (Object.prototype.hasOwnProperty.call(patch, "label")) out.label = toStr(patch.label);
+/* ---------- Sanitize patch ---------- */
+function sanitizePatch(patch){
+  const out={};
+  if("sku" in patch) out.sku=toStr(patch.sku);
+  if("label" in patch) out.label=toStr(patch.label);
+  if("barcode" in patch) out.barcode=toStr(patch.barcode);
 
-  if (Object.prototype.hasOwnProperty.call(patch, "placement")) {
-    const src = patch.placement || {};
-    out.placement = {};
-    if (Object.prototype.hasOwnProperty.call(src, "position"))
-      out.placement.position = Number.isFinite(+src.position) ? Math.trunc(+src.position) : undefined;
-    if (Object.prototype.hasOwnProperty.call(src, "isActive"))
-      out.placement.isActive = toBool(src.isActive);
-    if (Object.prototype.hasOwnProperty.call(src, "isFeatured"))
-      out.placement.isFeatured = toBool(src.isFeatured);
-    if (Object.prototype.hasOwnProperty.call(src, "is_default"))
-      out.placement.is_default = toBool(src.is_default);
-    if (Object.prototype.hasOwnProperty.call(src, "is_loyalty_eligible"))
-      out.placement.is_loyalty_eligible = toBool(src.is_loyalty_eligible);
+  if("placement" in patch){
+    const src=patch.placement||{};
+    out.placement={};
+    if("position" in src) out.placement.position=Number.isFinite(+src.position)?Math.trunc(+src.position):undefined;
+    if("isActive" in src) out.placement.isActive=toBool(src.isActive);
+    if("isFeatured" in src) out.placement.isFeatured=toBool(src.isFeatured);
+    if("is_default" in src) out.placement.is_default=toBool(src.is_default);
+    if("is_loyalty_eligible" in src) out.placement.is_loyalty_eligible=toBool(src.is_loyalty_eligible);
   }
 
-  if (Object.prototype.hasOwnProperty.call(patch, "pricing")) {
-    const src = patch.pricing || {};
-    out.pricing = {};
-    if (Object.prototype.hasOwnProperty.call(src, "supplier_price_excl"))
-      out.pricing.supplier_price_excl = money2(src.supplier_price_excl);
-    if (Object.prototype.hasOwnProperty.call(src, "selling_price_excl"))
-      out.pricing.selling_price_excl = money2(src.selling_price_excl);
-    if (Object.prototype.hasOwnProperty.call(src, "cost_price_excl"))
-      out.pricing.cost_price_excl = money2(src.cost_price_excl);
-    // legacy alias
-    if (!Object.prototype.hasOwnProperty.call(out.pricing, "cost_price_excl") &&
-        Object.prototype.hasOwnProperty.call(src, "base_price_excl"))
-      out.pricing.cost_price_excl = money2(src.base_price_excl);
-    if (Object.prototype.hasOwnProperty.call(src, "rebate_eligible"))
-      out.pricing.rebate_eligible = toBool(src.rebate_eligible);
-    if (Object.prototype.hasOwnProperty.call(src, "deposit_included"))
-      out.pricing.deposit_included = toBool(src.deposit_included);
+  if("pricing" in patch){
+    const src=patch.pricing||{};
+    out.pricing={};
+    if("supplier_price_excl" in src) out.pricing.supplier_price_excl=money2(src.supplier_price_excl);
+    if("selling_price_excl" in src) out.pricing.selling_price_excl=money2(src.selling_price_excl);
+    if("cost_price_excl" in src) out.pricing.cost_price_excl=money2(src.cost_price_excl);
+    if(!("cost_price_excl" in out.pricing)&&"base_price_excl" in src)
+      out.pricing.cost_price_excl=money2(src.base_price_excl);
+    if("rebate_eligible" in src) out.pricing.rebate_eligible=toBool(src.rebate_eligible);
+    if("deposit_included" in src) out.pricing.deposit_included=toBool(src.deposit_included);
   }
 
-  if (Object.prototype.hasOwnProperty.call(patch, "sale")) {
-    const src = patch.sale || {};
-    out.sale = {};
-    if (Object.prototype.hasOwnProperty.call(src, "is_on_sale"))
-      out.sale.is_on_sale = toBool(src.is_on_sale);
-    if (Object.prototype.hasOwnProperty.call(src, "sale_price_excl"))
-      out.sale.sale_price_excl = money2(src.sale_price_excl);
-    if (Object.prototype.hasOwnProperty.call(src, "qty_available"))
-      out.sale.qty_available = toInt(src.qty_available, 0);
+  if("sale" in patch){
+    const src=patch.sale||{};
+    out.sale={};
+    if("is_on_sale" in src) out.sale.is_on_sale=toBool(src.is_on_sale);
+    if("sale_price_excl" in src) out.sale.sale_price_excl=money2(src.sale_price_excl);
+    if("qty_available" in src) out.sale.qty_available=toInt(src.qty_available,0);
   }
 
-  if (Object.prototype.hasOwnProperty.call(patch, "pack")) {
-    const src = patch.pack || {};
-    out.pack = {};
-    if (Object.prototype.hasOwnProperty.call(src, "unit_count"))
-      out.pack.unit_count = toInt(src.unit_count, 1);
-    if (Object.prototype.hasOwnProperty.call(src, "volume"))
-      out.pack.volume = toNum(src.volume, 0);
-    if (Object.prototype.hasOwnProperty.call(src, "volume_unit"))
-      out.pack.volume_unit = toStr(src.volume_unit, "each");
+  if("pack" in patch){
+    const src=patch.pack||{};
+    out.pack={};
+    if("unit_count" in src) out.pack.unit_count=toInt(src.unit_count,1);
+    if("volume" in src) out.pack.volume=toNum(src.volume,0);
+    if("volume_unit" in src) out.pack.volume_unit=toStr(src.volume_unit,"each");
   }
 
-  if (Object.prototype.hasOwnProperty.call(patch, "rental")) {
-    const src = patch.rental || {};
-    out.rental = {};
-    if (Object.prototype.hasOwnProperty.call(src, "is_rental"))
-      out.rental.is_rental = toBool(src.is_rental);
-    if (Object.prototype.hasOwnProperty.call(src, "rental_price_excl"))
-      out.rental.rental_price_excl = money2(src.rental_price_excl);
-    if (Object.prototype.hasOwnProperty.call(src, "billing_period"))
-      out.rental.billing_period = toStr(src.billing_period, "monthly");
+  if("rental" in patch){
+    const src=patch.rental||{};
+    out.rental={};
+    if("is_rental" in src) out.rental.is_rental=toBool(src.is_rental);
+    if("rental_price_excl" in src) out.rental.rental_price_excl=money2(src.rental_price_excl);
+    if("billing_period" in src) out.rental.billing_period=toStr(src.billing_period,"monthly");
   }
 
-  if (Object.prototype.hasOwnProperty.call(patch, "returnable")) {
-    out.returnable = (patch.returnable && typeof patch.returnable === "object") ? patch.returnable : {};
+  if("returnable" in patch){
+    out.returnable=(patch.returnable && typeof patch.returnable==="object")?patch.returnable:{};
+  }
+
+  if("inventory" in patch){
+    out.inventory = parseInventory(patch.inventory);
   }
 
   return out;
 }
 
-export async function POST(req) {
-  try {
-    const { unique_id, variant_id, data } = await req.json();
+/* ---------- MAIN ---------- */
+export async function POST(req){
+  try{
+    const {unique_id,variant_id,data}=await req.json();
+    const pid=toStr(unique_id);
+    if(!is8(pid))return err(400,"Invalid Product ID","'unique_id' must be an 8-digit string.");
+    const vid=toStr(variant_id);
+    if(!is8(vid))return err(400,"Invalid Variant ID","'variant_id' must be an 8-digit string.");
+    if(!data||typeof data!=="object")return err(400,"Invalid Data","Provide a 'data' object.");
 
-    const pid = toStr(unique_id);
-    if (!is8(pid)) return err(400, "Invalid Product ID", "'unique_id' must be an 8-digit string.");
+    if("variant_id" in data && toStr(data.variant_id)!==vid)
+      return err(409,"Mismatched Variant ID","data.variant_id must match the target variant.");
 
-    const vid = toStr(variant_id);
-    if (!is8(vid)) return err(400, "Invalid Variant ID", "'variant_id' must be an 8-digit string.");
+    const ref=doc(db,"products_v2",pid);
+    const snap=await getDoc(ref);
+    if(!snap.exists())return err(404,"Product Not Found",`No product exists with unique_id ${pid}.`);
 
-    if (!data || typeof data !== "object") {
-      return err(400, "Invalid Data", "Provide a 'data' object with fields to update.");
-    }
+    const docData=snap.data()||{};
+    const list=Array.isArray(docData.variants)?[...docData.variants]:[];
+    const idx=list.findIndex(v=>toStr(v?.variant_id)===vid);
+    if(idx<0)return err(404,"Variant Not Found",`No variant with variant_id ${vid}.`);
 
-    // Prevent changing variant_id via payload
-    if (Object.prototype.hasOwnProperty.call(data, "variant_id") && toStr(data.variant_id) !== vid) {
-      return err(409, "Mismatched Variant ID", "data.variant_id must match the target variant_id.");
-    }
-
-    // Load product
-    const ref = doc(db, "products_v2", pid);
-    const snap = await getDoc(ref);
-    if (!snap.exists()) return err(404, "Product Not Found", `No product exists with unique_id ${pid}.`);
-
-    const docData = snap.data() || {};
-    const list = Array.isArray(docData.variants) ? [...docData.variants] : [];
-    if (!list.length) return err(409, "No Variants", "This product has no variants to update.");
-
-    // Locate target variant by 8-digit variant_id
-    const idx = list.findIndex(v => toStr(v?.variant_id) === vid);
-    if (idx < 0) return err(404, "Variant Not Found", `No variant with variant_id ${vid} on this product.`);
-
-    // Build sanitized patch ONLY for keys provided
-    const patch = sanitizePatch(data);
-
-    // Merge (objects deep, arrays replaced) then apply default flip if asked
-    let updated = deepMerge(list[idx], patch);
-
-    // ----- default flipping side-effect (placement.is_default) -----
-    const askedFlip = Object.prototype.hasOwnProperty.call(patch, "placement") &&
-                      Object.prototype.hasOwnProperty.call(patch.placement, "is_default");
-
-    if (askedFlip) {
-      const makeDefault = !!patch.placement.is_default;
-      if (makeDefault) {
-        // Clear default on all others
-        for (let i = 0; i < list.length; i++) {
-          if (i !== idx && list[i]?.placement) list[i].placement.is_default = false;
-        }
-        // Ensure this one is true
-        updated.placement = updated.placement || {};
-        updated.placement.is_default = true;
-      } else {
-        // Explicitly clear on this one only
-        updated.placement = updated.placement || {};
-        updated.placement.is_default = false;
+    const incomingBC=toStr(data?.barcode);
+    if(incomingBC){
+      const allBCs=await collectAllBarcodes();
+      const normalized=incomingBC.toUpperCase();
+      const currentBC=toStr(list[idx]?.barcode).toUpperCase();
+      const conflict=allBCs.find(b=>b.barcode===normalized && !(b.productId===pid && b.variantId===vid));
+      if(conflict){
+        return err(409,"Duplicate Barcode",`Barcode '${incomingBC}' already exists on another variant.`);
       }
     }
 
-    // Save back
-    list[idx] = updated;
+    const patch=sanitizePatch(data);
 
-    await updateDoc(ref, { variants: list, "timestamps.updatedAt": serverTimestamp() });
+    // Always replace inventory fully
+    if(Object.prototype.hasOwnProperty.call(data,"inventory")){
+      list[idx].inventory = patch.inventory || [];
+    }
 
-    // Who's default now?
-    const default_variant_id = (list.find(v => v?.placement?.is_default) || {}).variant_id ?? null;
+    if(Object.prototype.hasOwnProperty.call(data,"returnable")){
+      list[idx].returnable = patch.returnable || {};
+    }
 
+    let updated=deepMerge(list[idx],patch);
+
+    const askedFlip=("placement" in patch)&&("is_default" in patch.placement);
+    if(askedFlip){
+      const makeDefault=!!patch.placement.is_default;
+      if(makeDefault){
+        for(let i=0;i<list.length;i++){
+          if(i!==idx&&list[i]?.placement)list[i].placement.is_default=false;
+        }
+        updated.placement=updated.placement||{};
+        updated.placement.is_default=true;
+      }else{
+        updated.placement=updated.placement||{};
+        updated.placement.is_default=false;
+      }
+    }
+
+    list[idx]=updated;
+    await updateDoc(ref,{variants:list,"timestamps.updatedAt":serverTimestamp()});
+
+    const default_variant_id=(list.find(v=>v?.placement?.is_default)||{}).variant_id??null;
     return ok({
-      message: "Variant updated.",
-      unique_id: pid,
-      variant_id: vid,
+      message:"Variant updated.",
+      unique_id:pid,
+      variant_id:vid,
       default_variant_id,
-      variant: list[idx]
+      variant:list[idx]
     });
-  } catch (e) {
-    console.error("products_v2/variants/update (sanitized) failed:", e);
-    return err(500, "Unexpected Error", "Something went wrong while updating the variant.");
+  }catch(e){
+    console.error("variant update failed:",e);
+    return err(500,"Unexpected Error","Failed to update variant.");
   }
 }
