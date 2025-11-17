@@ -1,4 +1,3 @@
-// app/api/catalogue/v1/products/utils/addVariant/route.js
 import { NextResponse } from "next/server";
 import { db } from "@/lib/firebase";
 import { collection, doc, getDoc, getDocs, updateDoc, serverTimestamp } from "firebase/firestore";
@@ -17,7 +16,6 @@ const toBool=(v,f=false)=>
   f;
 const is8=(s)=>/^\d{8}$/.test(String(s??"").trim());
 
-/** Collect all variant_ids and barcodes across products_v2 */
 async function collectAllCodesAndBarcodes() {
   const snap = await getDocs(collection(db, "products_v2"));
   const ids = new Set();
@@ -37,7 +35,6 @@ async function collectAllCodesAndBarcodes() {
   return { ids, barcodes };
 }
 
-/** Sanitize inventory array */
 function parseInventory(arr) {
   if (!Array.isArray(arr)) return [];
   return arr
@@ -78,6 +75,7 @@ export async function POST(req){
       sku:toStr(data?.sku),
       label:toStr(data?.label),
       barcode:barcode,
+      barcodeImageUrl: toStr(data?.barcodeImageUrl, null) || null,
       placement:{
         position:Number.isFinite(+data?.placement?.position)?Math.trunc(+data.placement.position):nextPos,
         isActive:toBool(data?.placement?.isActive,true),

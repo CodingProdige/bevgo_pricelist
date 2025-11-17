@@ -1,65 +1,86 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/firebase";
-import { collection, doc, getDoc, getDocs } from "firebase/firestore";
+import { collection, doc, getDoc, getDocs, query, where, limit as qLimit } from "firebase/firestore";
 
 /* ---------- response helpers ---------- */
-const ok  =(p={},s=200)=>NextResponse.json({ok:true,...p},{status:s});
-const err =(s,t,m,e={})=>NextResponse.json({ok:false,title:t,message:m,...e},{status:s});
+const ok  = (p = {}, s = 200) => NextResponse.json({ ok: true, ...p }, { status: s });
+const err = (s, t, m, e = {}) => NextResponse.json({ ok: false, title: t, message: m, ...e }, { status: s });
 
 /* ---------- type helpers ---------- */
-function normStr(v){
+function normStr(v) {
   const s = String(v ?? "").trim();
   if (!s) return "";
   const low = s.toLowerCase();
   if (low === "null" || low === "undefined") return "";
   return s;
 }
-function toBool(v){
+function toBool(v) {
   if (typeof v === "boolean") return v;
   const s = normStr(v).toLowerCase();
   if (!s) return null;
-  if (["true","1","yes","y"].includes(s)) return true;
-  if (["false","0","no","n"].includes(s)) return false;
+  if (["true", "1", "yes", "y"].includes(s)) return true;
+  if (["false", "0", "no", "n"].includes(s)) return false;
   return null;
 }
-function tsToIso(v){
+function tsToIso(v) {
   return v && typeof v?.toDate === "function" ? v.toDate().toISOString() : v ?? null;
 }
-function normalizeTimestamps(doc){
+function normalizeTimestamps(doc) {
   if (!doc || typeof doc !== "object") return doc;
   const ts = doc.timestamps;
   return {
     ...doc,
-    ...(ts ? { 
-      timestamps: { 
-        createdAt: tsToIso(ts.createdAt), 
-        updatedAt: tsToIso(ts.updatedAt) 
-      } 
-    } : {})
+    ...(ts
+      ? {
+          timestamps: {
+            createdAt: tsToIso(ts.createdAt),
+            updatedAt: tsToIso(ts.updatedAt),
+          },
+        }
+      : {}),
   };
 }
 
 /* ---------- main handler ---------- */
-export async function GET(req){
-  try{
+export async function GET(req) {
+  try {
     const { searchParams } = new URL(req.url);
-
     const byId = normStr(searchParams.get("id"));
     const byLocId = normStr(searchParams.get("location_id"));
 
-    // ----- Single lookup -----
-    if (byId || byLocId){
-      const ref = doc(db, "bevgo_locations", byId || byLocId);
-      const snap = await getDoc(ref);
-      if (!snap.exists()) return err(404, "Not Found", `No location found with id '${byId || byLocId}'.`);
+    /* ---------- SINGLE LOOKUP ---------- */
+    if (byId || byLocId) {
+      let snap;
+
+      // Fetch by docId
+      if (byId) {
+        const ref = doc(db, "bevgo_locations", byId);
+        snap = await getDoc(ref);
+      }
+
+      // Fetch by location_id field (not docId)
+      else if (byLocId) {
+        const q = query(
+          collection(db, "bevgo_locations"),
+          where("location_id", "==", byLocId),
+          qLimit(1)
+        );
+        const rs = await getDocs(q);
+        snap = rs.docs[0];
+      }
+
+      if (!snap || !snap.exists()) {
+        return err(404, "Not Found", `No location found with ${byLocId ? `location_id '${byLocId}'` : `id '${byId}'`}.`);
+      }
+
       const data = normalizeTimestamps(snap.data() || {});
       data.docId = snap.id;
       return ok({ id: snap.id, data });
     }
 
-    // ----- List mode -----
-    const isActive   = toBool(searchParams.get("isActive"));
-    const isPrimary  = toBool(searchParams.get("isPrimary"));
+    /* ---------- LIST MODE ---------- */
+    const isActive = toBool(searchParams.get("isActive"));
+    const isPrimary = toBool(searchParams.get("isPrimary"));
     const typeFilter = normStr(searchParams.get("type"));
     const rawLimitNorm = normStr(searchParams.get("limit"));
     const rawLimit = (rawLimitNorm || "all").toLowerCase();
@@ -70,9 +91,9 @@ export async function GET(req){
     const col = collection(db, "bevgo_locations");
     const rs = await getDocs(col);
 
-    let items = rs.docs.map(d => ({
+    let items = rs.docs.map((d) => ({
       id: d.id,
-      data: normalizeTimestamps(d.data() || {})
+      data: normalizeTimestamps(d.data() || {}),
     }));
 
     // Apply filters
@@ -83,8 +104,8 @@ export async function GET(req){
       return true;
     });
 
-    // Sort by placement.position asc
-    items.sort((a,b)=>{
+    // Sort by placement.position ascending
+    items.sort((a, b) => {
       const pa = +a.data?.placement?.position || 0;
       const pb = +b.data?.placement?.position || 0;
       return pa - pb;
@@ -93,15 +114,18 @@ export async function GET(req){
     if (!noLimit && lim != null) items = items.slice(0, lim);
     const count = items.length;
 
-    // Normalize for final return
-    const data = items.map(it => ({
+    // Normalize final data
+    const data = items.map((it) => ({
       ...it.data,
-      docId: it.id
+      docId: it.id,
     }));
 
     return ok({ count, data });
-  }catch(e){
+  } catch (e) {
     console.error("bevgo_locations/get failed:", e);
-    return err(500, "Unexpected Error", "Something went wrong while fetching locations.");
+    return err(500, "Unexpected Error", "Something went wrong while fetching locations.", {
+      error: e.message,
+      stack: e.stack,
+    });
   }
 }
