@@ -13,11 +13,10 @@ const now = () => new Date().toISOString();
 const VAT = 0.15;
 const r2 = (v) => Number((+v).toFixed(2));
 
-/* Compute line totals */
 function computeLineTotals(v, qty){
   qty = Number(qty);
-  let price;
 
+  let price;
   if (v?.rental?.is_rental){
     price = r2(v.rental.rental_price_excl || 0);
   } else if (v?.sale?.is_on_sale){
@@ -43,7 +42,6 @@ function computeLineTotals(v, qty){
   };
 }
 
-/* Compute cart totals */
 function computeCartTotals(items){
   let subtotal = 0;
   let deposit  = 0;
@@ -86,7 +84,6 @@ function computeCartTotals(items){
 export async function POST(req){
   try {
     const { customerId } = await req.json();
-
     if (!customerId)
       return err(400,"Invalid Request","customerId is required.");
 
@@ -114,23 +111,57 @@ export async function POST(req){
 
     /* ---------------- EXISTING CART ---------------- */
     const cart = cartSnap.data();
-    const items = Array.isArray(cart.items) ? cart.items : [];
+    let items = Array.isArray(cart.items) ? cart.items : [];
 
-    // Only recalc totals (NO item modifications)
+    /* 🔥 LIVE HYDRATION FOR EACH ITEM 🔥 */
+    for (const it of items){
+      const vSnap = it.selected_variant_snapshot;
+      const prodSnap = it.product_snapshot;
+
+      const productRef = doc(db,"products_v2", prodSnap.product.unique_id);
+      const dbProd = await getDoc(productRef);
+      if(!dbProd.exists()) continue;
+
+      const liveProd = dbProd.data();
+      const liveVar = liveProd.variants.find(v =>
+        String(v.variant_id) === String(vSnap.variant_id)
+      );
+      if(!liveVar) continue;
+
+      // Update live snapshot values
+      it.selected_variant_snapshot.sale = {
+        ...vSnap.sale,
+        qty_available: liveVar.sale?.qty_available ?? 0,
+        is_on_sale:    liveVar.sale?.is_on_sale ?? false
+      };
+      it.selected_variant_snapshot.rental = {
+        ...vSnap.rental,
+        qty_available: liveVar.rental?.qty_available ?? 0,
+        is_rental: liveVar.rental?.is_rental ?? false
+      };
+
+      // Recalculate line totals using updated values
+      it.line_totals = computeLineTotals(
+        it.selected_variant_snapshot,
+        it.quantity
+      );
+    }
+
+    /* ---------------- RECOMPUTE CART TOTALS ---------------- */
     const recalculatedTotals = computeCartTotals(items);
 
     const resultCart = {
       ...cart,
+      items,
       totals: recalculatedTotals,
       item_count: items.reduce((a,it)=>a+(it.quantity||0),0),
-      cart_corrected: false,  // We did not clean anything
+      cart_corrected: false,
       timestamps: {
         ...cart.timestamps,
         updatedAt: now(),
       }
     };
 
-    // Save updated totals
     await setDoc(cartRef, resultCart);
 
     return ok({
