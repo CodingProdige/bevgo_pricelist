@@ -1,78 +1,107 @@
-// app/api/brands/reposition/route.js
 import { NextResponse } from "next/server";
 import { db } from "@/lib/firebase";
 import {
-  collection, doc, getDoc, getDocs, query, where, writeBatch
+  collection, doc, getDocs, query, where, writeBatch
 } from "firebase/firestore";
 
-const ok  =(p={},s=200)=>NextResponse.json({ ok:true,  ...p },{ status:s });
-const err =(s,t,m,e={})=>NextResponse.json({ ok:false, title:t, message:m, ...e },{ status:s });
-const chunk=(a,n)=>{ const r=[]; for(let i=0;i<a.length;i+=n) r.push(a.slice(i,i+n)); return r; };
+const ok  = (p={},s=200)=>NextResponse.json({ ok:true, data:{...p} },{ status:s });
+const err = (s,t,m,e={})=>NextResponse.json({ ok:false, title:t, message:m, ...e },{ status:s });
+
+const chunk = (arr, size) => {
+  const out = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+};
 
 export async function POST(req){
   try{
-    const { id, slug, position } = await req.json();
-    const newPos = Math.max(1, parseInt(position,10) || 1);
-    if (!id && !slug) return err(400,"Missing Locator","Provide 'id' (preferred) or 'slug'.");
+    const body = await req.json().catch(()=>({}));
 
-    // Resolve docId
-    let docId = (id||"").trim();
-    if (!docId){
-      const s = String(slug||"").trim();
-      const rs = await getDocs(query(collection(db,"brands"), where("brand.slug","==", s)));
-      if (rs.empty)  return err(404,"Not Found",`No brand with slug '${s}'.`);
-      if (rs.size>1) return err(409,"Slug Not Unique",`Multiple brands share slug '${s}'.`);
-      docId = rs.docs[0].id;
-    }
+    const slug = String(body?.slug ?? "").trim();
+    const direction = String(body?.direction ?? "").toLowerCase();
 
-    // Load target (need its category for scope)
-    const ref = doc(db,"brands", docId);
-    const snap = await getDoc(ref);
-    if (!snap.exists()) return err(404,"Not Found","Brand not found.");
-    const data = snap.data() || {};
-    const category = String(data?.grouping?.category || "").trim();
-    if (!category) return err(409,"Missing Category","Brand is missing 'grouping.category'.");
+    if (!slug)
+      return err(400,"Missing Slug","Provide 'slug'.");
+    if (!["up","down"].includes(direction))
+      return err(400,"Invalid Direction","Direction must be 'up' or 'down'.");
 
-    // Fetch scope = all brands in same category (no orderBy; sort in memory)
-    const rs = await getDocs(query(collection(db,"brands"), where("grouping.category","==", category)));
+    // Resolve brand by slug
+    const rs = await getDocs(query(
+      collection(db,"brands"),
+      where("brand.slug","==", slug)
+    ));
 
-    const rows = rs.docs.map(d => {
-      const pos = Number(d.data()?.placement?.position ?? Number.POSITIVE_INFINITY);
-      return { id: d.id, pos: Number.isFinite(pos) ? pos : Number.POSITIVE_INFINITY };
-    }).sort((a,b)=>a.pos-b.pos);
+    if (rs.empty)
+      return err(404,"Not Found",`No brand found with slug '${slug}'.`);
+    if (rs.size > 1)
+      return err(409,"Conflict","Multiple brands share this slug.");
+
+    const brandDoc = rs.docs[0];
+    const docId = brandDoc.id;
+
+    // Fetch ALL brands (global ordering)
+    const allSnap = await getDocs(collection(db,"brands"));
+
+    const rows = allSnap.docs.map((d, i) => {
+      const pos = Number.isFinite(+d.data()?.placement?.position)
+        ? +d.data().placement.position
+        : i + 1;
+      return { id: d.id, pos };
+    })
+    .sort((a,b)=>a.pos - b.pos);
+
+    if (!rows.length)
+      return err(404,"Empty","No brands in collection.");
 
     const ids = rows.map(r=>r.id);
     const fromIdx = ids.indexOf(docId);
-    if (fromIdx < 0) return err(404,"Not Found","Brand not in ordering.");
 
+    if (fromIdx === -1)
+      return err(404,"Not Found","Brand not found in ordering.");
+
+    const len = ids.length;
+
+    // wrap-around one-step movement
+    const targetIdx = direction === "up"
+      ? (fromIdx - 1 + len) % len
+      : (fromIdx + 1) % len;
+
+    // nudge
     const arr = [...ids];
-    const item = arr.splice(fromIdx,1)[0];
-    const targetIdx = Math.min(Math.max(newPos,1), arr.length+1) - 1;
-    arr.splice(targetIdx, 0, item);
+    const [moved] = arr.splice(fromIdx,1);
+    arr.splice(targetIdx,0,moved);
 
-    // Write back contiguous positions
+    // BUILD POSITION MAP → NO DUPLICATES EVER
+    const posMap = arr.reduce((acc, id, i) => {
+      acc[id] = i + 1;
+      return acc;
+    }, {});
+
+    // WRITE BACK CONTIGUOUS POSITIONS
     let affected = 0;
     for (const part of chunk(arr, 450)){
-      const b = writeBatch(db);
-      part.forEach(cid => {
-        const pos = arr.indexOf(cid) + 1;
-        b.update(doc(db,"brands", cid), { "placement.position": pos });
+      const batch = writeBatch(db);
+      part.forEach(cid=>{
+        batch.update(doc(db,"brands",cid),{
+          "placement.position": posMap[cid]
+        });
         affected++;
       });
-      await b.commit();
+      await batch.commit();
     }
 
     return ok({
-      message: "Brand repositioned.",
-      id: docId,
-      category,
-      final_position: targetIdx + 1,
+      message: "Brand nudged.",
+      slug,
+      from_index: fromIdx,
+      final_index: targetIdx,
       affected
     });
-  } catch (e) {
-    console.error("brands/reposition failed:", e);
-    return err(500,"Unexpected Error","Failed to reposition brand.", {
-      details: String(e?.message||"").slice(0,300)
+
+  } catch (e){
+    console.error("brands/nudge failed:", e);
+    return err(500,"Unexpected Error","Failed to nudge brand.",{
+      details: String(e?.message ?? "").slice(0,300)
     });
   }
 }

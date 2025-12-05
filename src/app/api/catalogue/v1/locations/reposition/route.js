@@ -1,62 +1,109 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/firebase";
-import { collection, doc, getDoc, getDocs, orderBy, query, writeBatch } from "firebase/firestore";
+import {
+  collection, doc, getDocs, query, where, writeBatch
+} from "firebase/firestore";
 
-const ok  =(p={},s=200)=>NextResponse.json({ ok:true, ...p },{ status:s });
-const err =(s,t,m,e={})=>NextResponse.json({ ok:false, title:t, message:m, ...e },{ status:s });
-const chunk=(a,n)=>{const r=[];for(let i=0;i<a.length;i+=n)r.push(a.slice(i,i+n));return r;};
+const ok  = (p={},s=200)=>NextResponse.json({ ok:true, data:{...p} },{ status:s });
+const err = (s,t,m,e={})=>NextResponse.json({ ok:false, title:t, message:m, ...e },{ status:s });
+
+const chunk = (arr,size)=>{
+  const out=[];
+  for(let i=0;i<arr.length;i+=size) out.push(arr.slice(i,i+size));
+  return out;
+};
 
 export async function POST(req){
   try{
-    const { id, position } = await req.json();
-    const docId = String(id || "").trim();
-    const newPos = Math.max(1, parseInt(position,10) || 1);
-    if (!docId) return err(400,"Invalid Id","'id' is required.");
+    const body = await req.json().catch(()=>({}));
 
-    const ref = doc(db,"bevgo_locations",docId);
-    const snap = await getDoc(ref);
-    if (!snap.exists()) return err(404,"Not Found","Location not found.");
-    const curr = snap.data() || {};
-    const currPos = +curr?.placement?.position || 1;
+    const location_id = String(body?.location_id ?? "").trim();
+    const direction   = String(body?.direction ?? "").toLowerCase();
 
-    // fetch full ordered list
-    const col = collection(db,"bevgo_locations");
-    const rs = await getDocs(query(col, orderBy("placement.position","asc")));
-    const rows = rs.docs.map(d => ({
+    if (!location_id)
+      return err(400,"Missing Id","Provide 'location_id'.");
+
+    if (!["up","down"].includes(direction))
+      return err(400,"Invalid Direction","Direction must be 'up' or 'down'.");
+
+    // Find doc by location_id
+    const lookupSnap = await getDocs(query(
+      collection(db,"bevgo_locations"),
+      where("location_id","==", location_id)
+    ));
+
+    if (lookupSnap.empty)
+      return err(404,"Not Found",`No location found with location_id '${location_id}'.`);
+
+    if (lookupSnap.size > 1)
+      return err(409,"Conflict","location_id must be unique.");
+
+    const docSnap = lookupSnap.docs[0];
+    const docId   = docSnap.id;
+
+    // -------- GLOBAL ORDERING OF ALL LOCATIONS --------
+    const allSnap = await getDocs(collection(db,"bevgo_locations"));
+
+    const rows = allSnap.docs.map((d,i)=>({
       id: d.id,
-      pos: +(d.data()?.placement?.position || 0)
-    })).sort((a,b) => a.pos - b.pos);
+      pos: Number.isFinite(+d.data()?.placement?.position)
+          ? +d.data().placement.position
+          : i+1
+    }))
+    .sort((a,b)=>a.pos - b.pos);
 
-    // rebuild ordering
-    const ids = rows.map(r => r.id);
+    if (!rows.length)
+      return err(404,"Empty","No locations available.");
+
+    const ids = rows.map(r=>r.id);
     const fromIdx = ids.indexOf(docId);
-    if (fromIdx < 0) return err(404,"Not Found","Location not found in ordering.");
 
+    if (fromIdx === -1)
+      return err(404,"Not Found","Location not in ordering.");
+
+    const len = ids.length;
+
+    // wrap-around step movement
+    const targetIdx = direction === "up"
+      ? (fromIdx - 1 + len) % len
+      : (fromIdx + 1) % len;
+
+    // do the nudge
     const arr = [...ids];
-    const item = arr.splice(fromIdx,1)[0];
-    const targetIdx = Math.min(Math.max(newPos,1), arr.length+1) - 1; // 0-based
-    arr.splice(targetIdx,0,item);
+    const [moved] = arr.splice(fromIdx,1);
+    arr.splice(targetIdx,0,moved);
 
-    // update positions in contiguous order using batched writes
+    // position map: { id -> position }
+    const posMap = arr.reduce((acc,id,i)=>{
+      acc[id] = i + 1;
+      return acc;
+    },{});
+
+    // write updated positions
     let affected = 0;
-    for (const part of chunk(arr, 450)) {
+    for (const part of chunk(arr,450)){
       const batch = writeBatch(db);
-      part.forEach((id, iPartIdx) => {
-        const absoluteIdx = arr.indexOf(id);
-        const pos = absoluteIdx + 1;
-        batch.update(doc(db,"bevgo_locations",id), { "placement.position": pos });
+      part.forEach(cid=>{
+        batch.update(doc(db,"bevgo_locations",cid),{
+          "placement.position": posMap[cid]
+        });
         affected++;
       });
       await batch.commit();
     }
 
     return ok({
-      message: "Location repositioned.",
-      affected,
-      final_position: targetIdx + 1
+      message: "Location nudged.",
+      location_id,
+      from_index: fromIdx,
+      final_index: targetIdx,
+      affected
     });
-  }catch(e){
-    console.error("bevgo_locations/reposition failed:", e);
-    return err(500,"Unexpected Error","Failed to reposition location.");
+
+  } catch(e){
+    console.error("bevgo_locations/nudge failed:", e);
+    return err(500,"Unexpected Error","Failed to nudge location.",{
+      details: String(e?.message ?? "").slice(0,300)
+    });
   }
 }

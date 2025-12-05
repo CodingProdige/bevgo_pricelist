@@ -1,55 +1,101 @@
-// app/api/categories/reposition/route.js
 import { NextResponse } from "next/server";
 import { db } from "@/lib/firebase";
-import { collection, doc, getDoc, getDocs, orderBy, query, writeBatch } from "firebase/firestore";
+import {
+  collection, doc, getDocs, query, where, writeBatch
+} from "firebase/firestore";
 
-const ok  =(p={},s=200)=>NextResponse.json({ ok:true, ...p },{ status:s });
-const err =(s,t,m,e={})=>NextResponse.json({ ok:false, title:t, message:m, ...e },{ status:s });
-const chunk=(a,n)=>{const r=[];for(let i=0;i<a.length;i+=n)r.push(a.slice(i,i+n));return r;};
+const ok  = (p={},s=200)=>NextResponse.json({ ok:true, data:{...p} },{ status:s });
+const err = (s,t,m,e={})=>NextResponse.json({ ok:false, title:t, message:m, ...e },{ status:s });
+
+const chunk = (arr,size)=>{
+  const out=[];
+  for(let i=0;i<arr.length;i+=size) out.push(arr.slice(i,i+size));
+  return out;
+};
 
 export async function POST(req){
   try{
-    const { id, position } = await req.json();
-    const docId = String(id||"").trim();
-    const newPos = Math.max(1, parseInt(position,10)||1);
-    if (!docId) return err(400,"Invalid Id","'id' is required.");
+    const body = await req.json().catch(()=>({}));
+    const slug = String(body?.slug ?? "").trim();
+    const direction = String(body?.direction ?? "").toLowerCase();
 
-    const ref = doc(db,"categories",docId);
-    const snap = await getDoc(ref);
-    if (!snap.exists()) return err(404,"Not Found","Category not found.");
-    const curr = snap.data()||{};
-    const currPos = +curr?.placement?.position || 1;
+    if (!slug)
+      return err(400,"Missing Slug","Provide 'slug'.");
+    if (!["up","down"].includes(direction))
+      return err(400,"Invalid Direction","Direction must be 'up' or 'down'.");
 
-    // fetch full scope ordered
-    const col = collection(db,"categories");
-    const rs = await getDocs(query(col, orderBy("placement.position","asc")));
-    const rows = rs.docs.map(d=>({ id:d.id, pos:+(d.data()?.placement?.position||0) })).sort((a,b)=>a.pos-b.pos);
+    // Lookup category by slug
+    const rs = await getDocs(query(
+      collection(db,"categories"),
+      where("category.slug","==", slug)
+    ));
 
-    // rebuild order
+    if (rs.empty)
+      return err(404,"Not Found",`No category found with slug '${slug}'.`);
+    if (rs.size > 1)
+      return err(409,"Conflict","Multiple categories share this slug.");
+
+    const docSnap = rs.docs[0];
+    const docId = docSnap.id;
+
+    // Fetch ALL categories (global ordering)
+    const allSnap = await getDocs(collection(db,"categories"));
+
+    const rows = allSnap.docs.map((d,i)=>({
+      id: d.id,
+      pos: Number.isFinite(+d.data()?.placement?.position)
+        ? +d.data().placement.position
+        : i+1
+    }))
+    .sort((a,b)=>a.pos - b.pos);
+
     const ids = rows.map(r=>r.id);
     const fromIdx = ids.indexOf(docId);
-    if (fromIdx < 0) return err(404,"Not Found","Category not found in ordering.");
+    if (fromIdx === -1)
+      return err(404,"Not Found","Category not in ordering.");
 
+    const len = ids.length;
+    const targetIdx =
+      direction === "up"
+        ? (fromIdx - 1 + len) % len
+        : (fromIdx + 1) % len;
+
+    // Nudge 1 step
     const arr = [...ids];
-    const item = arr.splice(fromIdx,1)[0];
-    const targetIdx = Math.min(Math.max(newPos,1), arr.length+1) - 1; // 0-based
-    arr.splice(targetIdx,0,item);
+    const [moved] = arr.splice(fromIdx,1);
+    arr.splice(targetIdx,0,moved);
 
-    // write contiguous positions
+    // Build deterministic position map
+    const posMap = arr.reduce((acc,id,i)=>{
+      acc[id] = i + 1;
+      return acc;
+    },{});
+
+    // Write contiguous positions
     let affected = 0;
-    for (const part of chunk(arr, 450)) {
+    for (const part of chunk(arr,450)){
       const batch = writeBatch(db);
-      part.forEach((id, iPartIdx) => {
-        const absoluteIdx = arr.indexOf(id); // position in full array
-        const pos = absoluteIdx + 1;
-        batch.update(doc(db,"categories",id), { "placement.position": pos });
+      part.forEach(cid=>{
+        batch.update(doc(db,"categories",cid),{
+          "placement.position": posMap[cid]
+        });
         affected++;
       });
       await batch.commit();
     }
-    return ok({ message:"Category repositioned.", affected, final_position: targetIdx+1 });
-  }catch(e){
-    console.error("categories/reposition failed:",e);
-    return err(500,"Unexpected Error","Failed to reposition category.");
+
+    return ok({
+      message: "Category nudged.",
+      slug,
+      from_index: fromIdx,
+      final_index: targetIdx,
+      affected
+    });
+
+  } catch(e){
+    console.error("categories/nudge failed:", e);
+    return err(500,"Unexpected Error","Failed to nudge category.",{
+      details: String(e?.message ?? "").slice(0,300)
+    });
   }
 }

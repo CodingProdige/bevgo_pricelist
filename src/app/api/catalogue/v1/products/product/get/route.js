@@ -112,12 +112,15 @@ export async function GET(req){
       return pa - pb;
     });
 
+    // 4.5) Count total BEFORE applying limit
+    const total = items.length; 
+
     // 5) Apply limit if any
     if (!noTopLimit && lim != null) items = items.slice(0, lim);
 
     const count = items.length;
 
-    if (!groupByBrand) return ok({ count, items });
+    if (!groupByBrand) return ok({ total, count, items });
 
     // 6) Optional group by brand
     const map = new Map();
@@ -130,7 +133,7 @@ export async function GET(req){
       .sort(([a],[b])=>a.localeCompare(b))
       .map(([brand, items])=>({ brand, items }));
 
-    return ok({ count, groups });
+    return ok({ total, count, groups });
   }catch(e){
     console.error("products_v2/get (in-memory) failed:", e);
     return err(500,"Unexpected Error","Something went wrong while fetching products.");

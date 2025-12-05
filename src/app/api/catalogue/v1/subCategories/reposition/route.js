@@ -1,83 +1,107 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/firebase";
 import {
-  collection, doc, getDoc, getDocs, query, where, writeBatch
+  collection, doc, getDocs, query, where, writeBatch
 } from "firebase/firestore";
 
-const ok  =(p={},s=200)=>NextResponse.json({ ok:true, ...p },{ status:s });
-const err =(s,t,m,e={})=>NextResponse.json({ ok:false, title:t, message:m, ...e },{ status:s });
-const chunk=(a,n)=>{ const r=[]; for(let i=0;i<a.length;i+=n) r.push(a.slice(i,i+n)); return r; };
+const ok  = (p={},s=200)=>NextResponse.json({ ok:true, data:{...p} },{ status:s });
+const err = (s,t,m,e={})=>NextResponse.json({ ok:false, title:t, message:m, ...e },{ status:s });
+
+const chunk = (arr,size)=>{
+  const out=[];
+  for(let i=0;i<arr.length;i+=size) out.push(arr.slice(i,i+size));
+  return out;
+};
 
 export async function POST(req){
   try{
-    const { id, slug, position } = await req.json();
-    const newPos = Math.max(1, parseInt(position,10) || 1);
-    if (!id && !slug) return err(400,"Missing Locator","Provide 'id' (preferred) or 'slug'.");
+    const body = await req.json().catch(()=>({}));
 
-    // Resolve docId
-    let docId = (id||"").trim();
-    if (!docId){
-      const s = String(slug||"").trim();
-      const rs = await getDocs(query(collection(db,"sub_categories"), where("subCategory.slug","==", s)));
-      if (rs.empty)  return err(404,"Not Found",`No sub-category with slug '${s}'.`);
-      if (rs.size>1) return err(409,"Slug Not Unique",`Multiple sub-categories share slug '${s}'.`);
-      docId = rs.docs[0].id;
-    }
+    const slug = String(body?.slug ?? "").trim();
+    const direction = String(body?.direction ?? "").toLowerCase();
 
-    // Load the target document (need its parent category for scope)
-    const ref = doc(db,"sub_categories", docId);
-    const snap = await getDoc(ref);
-    if (!snap.exists()) return err(404,"Not Found","Sub-category not found.");
-    const data = snap.data() || {};
-    const parentCat = String(data?.grouping?.category || "").trim();
-    if (!parentCat) return err(409,"Missing Category","Sub-category is missing 'grouping.category'.");
+    if (!slug)
+      return err(400,"Missing Slug","Provide 'slug'.");
+    if (!["up","down"].includes(direction))
+      return err(400,"Invalid Direction","Direction must be 'up' or 'down'.");
 
-    // Fetch all subs under that category (no orderBy to avoid composite index)
-    const col = collection(db,"sub_categories");
-    const rs  = await getDocs(query(col, where("grouping.category","==", parentCat)));
+    // Resolve subcategory by slug
+    const rs = await getDocs(query(
+      collection(db,"sub_categories"),
+      where("subCategory.slug","==", slug)
+    ));
 
-    // Build sortable array (fallback position pushes to end)
-    const rows = rs.docs.map(d => {
-      const pos = Number(d.data()?.placement?.position ?? Number.POSITIVE_INFINITY);
-      return { id: d.id, pos: Number.isFinite(pos) ? pos : Number.POSITIVE_INFINITY };
-    });
+    if (rs.empty)
+      return err(404,"Not Found",`No sub-category found with slug '${slug}'.`);
+    if (rs.size > 1)
+      return err(409,"Conflict","Multiple sub-categories share this slug.");
 
-    // Sort in memory by position asc; items with missing/NaN go last
-    rows.sort((a,b)=>a.pos-b.pos);
+    const docSnap = rs.docs[0];
+    const docId = docSnap.id;
 
-    // Build id list, move target
-    const ids = rows.map(r => r.id);
+    // -------- GLOBAL ORDERING (no category scoping) --------
+    const allSnap = await getDocs(collection(db,"sub_categories"));
+
+    const rows = allSnap.docs.map((d,i)=>({
+      id: d.id,
+      pos: Number.isFinite(+d.data()?.placement?.position)
+        ? +d.data().placement.position
+        : i+1
+    }))
+    .sort((a,b)=>a.pos - b.pos);
+
+    if (!rows.length)
+      return err(404,"Empty","No sub-categories available.");
+
+    const ids = rows.map(r=>r.id);
     const fromIdx = ids.indexOf(docId);
-    if (fromIdx < 0) return err(404,"Not Found","Sub-category not in ordering.");
 
+    if (fromIdx === -1)
+      return err(404,"Not Found","Sub-category not in ordering.");
+
+    const len = ids.length;
+
+    // wrap-around movement
+    const targetIdx = direction === "up"
+      ? (fromIdx - 1 + len) % len
+      : (fromIdx + 1) % len;
+
+    // reorder
     const arr = [...ids];
-    const item = arr.splice(fromIdx,1)[0];
-    const targetIdx = Math.min(Math.max(newPos,1), arr.length+1) - 1; // 0-based
-    arr.splice(targetIdx, 0, item);
+    const [moved] = arr.splice(fromIdx,1);
+    arr.splice(targetIdx,0,moved);
 
-    // Write contiguous positions 1..N in chunks
+    // position map
+    const posMap = arr.reduce((acc,id,i)=>{
+      acc[id] = i + 1;
+      return acc;
+    },{});
+
+    // write back contiguous positions
     let affected = 0;
-    for (const part of chunk(arr, 450)){
-      const b = writeBatch(db);
-      part.forEach((cid) => {
-        const pos = arr.indexOf(cid) + 1;
-        b.update(doc(db,"sub_categories", cid), { "placement.position": pos });
+    for (const part of chunk(arr,450)){
+      const batch = writeBatch(db);
+      part.forEach(cid=>{
+        batch.update(doc(db,"sub_categories",cid),{
+          "placement.position": posMap[cid]
+        });
         affected++;
       });
-      await b.commit();
+      await batch.commit();
     }
 
     return ok({
-      message: "Sub-category repositioned.",
-      id: docId,
-      category: parentCat,
-      final_position: targetIdx + 1,
+      message: "Sub-category nudged.",
+      slug,
+      from_index: fromIdx,
+      final_index: targetIdx,
       affected
     });
-  } catch (e) {
-    console.error("sub_categories/reposition failed:", e);
-    return err(500,"Unexpected Error","Failed to reposition sub-category.", {
-      details: String(e?.message||"").slice(0,300)
+
+  } catch(e){
+    console.error("sub_categories/nudge failed:", e);
+    return err(500,"Unexpected Error","Failed to nudge sub-category.",{
+      details: String(e?.message ?? "").slice(0,300)
     });
   }
 }

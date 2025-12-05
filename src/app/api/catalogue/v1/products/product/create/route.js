@@ -1,26 +1,35 @@
-// app/api/catalogue/v1/products/product/create/route.js
 import { NextResponse } from "next/server";
 import { db } from "@/lib/firebase";
 import {
-  collection, doc, getDoc, setDoc, serverTimestamp, where
+  collection, doc, getDoc, setDoc, serverTimestamp,
+  where, query, getDocs
 } from "firebase/firestore";
 import { nextPosition } from "@/app/api/_utils/position";
 
 /* ---------------- response helpers ---------------- */
-const ok  = (p = {}, s = 201) => NextResponse.json({ ok: true, ...p }, { status: s });
-const err = (s, t, m, e = {}) => NextResponse.json({ ok: false, title: t, message: m, ...e }, { status: s });
+const ok  = (p={},s=201)=>NextResponse.json({ ok:true, ...p },{ status:s });
+const err = (s,t,m,e={})=>NextResponse.json({ ok:false, title:t, message:m, ...e },{ status:s });
 
-/* ---------------- type sanitizers ---------------- */
-const is8   = (s) => /^\d{8}$/.test(String(s ?? "").trim());
-const toStr = (v, f = "") => (v == null ? f : String(v)).trim();
-const toBool= (v, f = false) =>
-  typeof v === "boolean" ? v
-  : typeof v === "number" ? v !== 0
-  : typeof v === "string" ? ["true","1","yes","y"].includes(v.toLowerCase())
-  : f;
-const toInt = (v, f = 0) => Number.isFinite(+v) ? Math.trunc(+v) : f;
+/* ---------------- type helpers ---------------- */
+const is8  = (s)=>/^\d{8}$/.test(String(s ?? "").trim());
+const toStr=(v,f="")=>(v==null?f:String(v)).trim();
+const toBool=(v,f=false)=>
+  typeof v==="boolean"?v
+  :typeof v==="number"?v!==0
+  :typeof v==="string"?["true","1","yes","y"].includes(v.toLowerCase())
+  :f;
+const toInt=(v,f=0)=>Number.isFinite(+v)?Math.trunc(+v):f;
+
+/* ---------------- NEW: Title Normalizer ---------------- */
+function normalizeTitleSlug(title){
+  return String(title || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "")  // remove spaces, punctuation, symbols
+    .trim();
+}
 
 /* ---------------- field sanitizers ---------------- */
+// (unchanged — keeping your entire stack)
 function parseKeywords(value){
   const raw = Array.isArray(value) ? value.join(",") : (value ?? "");
   return String(raw)
@@ -47,46 +56,46 @@ function sanitizeBlurHash(v){
 }
 
 function parseImage(input, fallbackPos = null){
-  if (!input) return { imageUrl: null, blurHashUrl: null, ...(fallbackPos ? { position: fallbackPos } : {}) };
-  if (typeof input === "string") {
-    return { imageUrl: sanitizeUrl(input), blurHashUrl: null, ...(fallbackPos ? { position: fallbackPos } : {}) };
+  if (!input) return { imageUrl:null, blurHashUrl:null, ...(fallbackPos?{position:fallbackPos}:{}) };
+  if (typeof input==="string"){
+    return { imageUrl:sanitizeUrl(input), blurHashUrl:null, ...(fallbackPos?{position:fallbackPos}:{}) };
   }
   if (typeof input === "object"){
     const imageUrl    = sanitizeUrl(input.imageUrl ?? input.url);
     const blurHashUrl = sanitizeBlurHash(input.blurHashUrl ?? input.blurhash ?? input.blurHash);
-    const pos = Number.isFinite(+input?.position) ? toInt(input.position, undefined) : undefined;
+    const pos = Number.isFinite(+input?.position)?toInt(input.position):undefined;
     const base = { imageUrl, blurHashUrl };
-    return pos != null ? { ...base, position: pos } : (fallbackPos ? { ...base, position: fallbackPos } : base);
+    return pos!=null ? {...base,position:pos} : (fallbackPos?{...base,position:fallbackPos}:base);
   }
-  return { imageUrl: null, blurHashUrl: null, ...(fallbackPos ? { position: fallbackPos } : {}) };
+  return { imageUrl:null, blurHashUrl:null, ...(fallbackPos?{position:fallbackPos}:{}) };
 }
 
 function parseImages(value){
-  let arr = [];
-  if (Array.isArray(value)) {
-    arr = value.map((v, i) => parseImage(v, i + 1)).filter(o => o.imageUrl || o.blurHashUrl);
-  } else if (value) {
-    const one = parseImage(value, 1);
-    if (one.imageUrl || one.blurHashUrl) arr = [one];
+  let arr=[];
+  if (Array.isArray(value)){
+    arr=value.map((v,i)=>parseImage(v,i+1)).filter(o=>o.imageUrl||o.blurHashUrl);
+  } else if (value){
+    const one=parseImage(value,1);
+    if (one.imageUrl||one.blurHashUrl) arr=[one];
   }
-  if (arr.length) {
+  if (arr.length){
     arr = arr
-      .map((it, i) => ({ ...it, position: Number.isFinite(+it.position) ? toInt(it.position, i + 1) : (i + 1) }))
-      .sort((a,b) => a.position - b.position)
-      .map((it, i) => ({ ...it, position: i + 1 }));
+      .map((it,i)=>({...it,position:Number.isFinite(+it.position)?toInt(it.position,i+1):(i+1)}))
+      .sort((a,b)=>a.position-b.position)
+      .map((it,i)=>({...it,position:i+1}));
   }
   return arr;
 }
 
 function normalizeTimestamps(obj){
   if (!obj || typeof obj !== "object") return obj;
-  const out = { ...obj };
-  const ts = out?.timestamps;
-  if (ts && typeof ts === "object") {
-    const toIso = (v)=>(v && typeof v?.toDate==="function") ? v.toDate().toISOString() : v;
+  const out={...obj};
+  const ts=out?.timestamps;
+  if (ts && typeof ts==="object"){
+    const toIso=(v)=>v && typeof v?.toDate==="function" ? v.toDate().toISOString() : v;
     out.timestamps = {
       createdAt: toIso(ts.createdAt),
-      updatedAt: toIso(ts.updatedAt),
+      updatedAt: toIso(ts.updatedAt)
     };
   }
   return out;
@@ -96,69 +105,102 @@ function normalizeTimestamps(obj){
 export async function POST(req){
   try{
     const { data } = await req.json();
-    if (!data || typeof data !== "object") {
+    if (!data || typeof data !== "object")
       return err(400,"Invalid Data","Provide a 'data' object.");
-    }
 
     const uniqueId = toStr(data?.product?.unique_id);
-    if (!is8(uniqueId)) {
+    if (!is8(uniqueId))
       return err(400,"Invalid Unique Id","'product.unique_id' must be an 8-digit string.");
-    }
 
     const category    = toStr(data?.grouping?.category);
     const subCategory = toStr(data?.grouping?.subCategory);
     const brand       = toStr(data?.grouping?.brand);
-    if (!category || !subCategory || !brand) {
-      return err(400,"Missing Grouping","category, subCategory and brand are required.");
-    }
+    const titleRaw    = toStr(data?.product?.title);
+    const titleSlug   = normalizeTitleSlug(titleRaw);
 
+    if (!category || !subCategory || !brand)
+      return err(400,"Missing Grouping","category, subCategory and brand are required.");
+
+    if (!titleRaw)
+      return err(400,"Invalid Title","product.title is required.");
+
+    /* --- Check duplicate unique_id --- */
     const ref = doc(db,"products_v2", uniqueId);
     const existing = await getDoc(ref);
-    if (existing.exists()) return err(409,"Already Exists",`Product ${uniqueId} already exists.`);
+    if (existing.exists())
+      return err(409,"Already Exists",`Product ${uniqueId} already exists.`);
 
+    /* --- Check duplicate titleSlug inside grouping --- */
+    const q = query(
+      collection(db,"products_v2"),
+      where("grouping.category","==",category),
+      where("grouping.subCategory","==",subCategory),
+      where("grouping.brand","==",brand),
+      where("product.titleSlug","==",titleSlug)
+    );
+
+    const dupSnap = await getDocs(q);
+    if (!dupSnap.empty){
+      return err(409,"Duplicate Title",
+        `A product with a similar title already exists in this grouping.`
+      );
+    }
+
+    /* --- Determine position --- */
     const col = collection(db,"products_v2");
-    const requestedPos = Number.isFinite(+data?.placement?.position) ? toInt(data.placement.position) : null;
+    const requestedPos =
+      Number.isFinite(+data?.placement?.position) ? toInt(data.placement.position) : null;
+
     const position = requestedPos ?? await nextPosition(col, [
       where("grouping.category","==",category),
       where("grouping.subCategory","==",subCategory),
       where("grouping.brand","==",brand),
     ]);
 
+    /* --- Build product body --- */
     const body = {
       docId: uniqueId,
       grouping: { category, subCategory, brand },
       placement: {
         position,
-        isActive:   toBool(data?.placement?.isActive, true),
-        isFeatured: toBool(data?.placement?.isFeatured, false),
-        supplier_out_of_stock: toBool(data?.placement?.supplier_out_of_stock, false),
-        in_stock:   toBool(data?.placement?.in_stock, true)
+        isActive: toBool(data?.placement?.isActive,true),
+        isFeatured: toBool(data?.placement?.isFeatured,false),
+        supplier_out_of_stock: toBool(data?.placement?.supplier_out_of_stock,false),
+        in_stock: toBool(data?.placement?.in_stock,true),
       },
       media: {
-        color:  toStr(data?.media?.color, null) || null,
+        color: toStr(data?.media?.color,null) || null,
         images: parseImages(data?.media?.images),
-        video:  toStr(data?.media?.video, null) || null,
-        icon:   toStr(data?.media?.icon,  null) || null
+        video: toStr(data?.media?.video,null) || null,
+        icon:  toStr(data?.media?.icon, null) || null
       },
       product: {
-        unique_id:   uniqueId,
-        title:       toStr(data?.product?.title, null) || null,
-        description: toStr(data?.product?.description, null) || null,
-        keywords:    parseKeywords(data?.product?.keywords)
+        unique_id: uniqueId,
+        title: titleRaw,
+        titleSlug: titleSlug,       // <--- NEW FIELD STORED
+        description: toStr(data?.product?.description,null) || null,
+        keywords: parseKeywords(data?.product?.keywords)
       },
-      variants:  Array.isArray(data?.variants)  ? data.variants  : [],
-      inventory: Array.isArray(data?.inventory) ? data.inventory : [],
-      timestamps: { createdAt: serverTimestamp(), updatedAt: serverTimestamp() }
+      variants: Array.isArray(data?.variants)?data.variants:[],
+      inventory: Array.isArray(data?.inventory)?data.inventory:[],
+      timestamps: {
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      }
     };
 
     await setDoc(ref, body);
+
     const createdSnap = await getDoc(ref);
     const createdData = normalizeTimestamps(createdSnap.data() || {});
     const product = { id: createdSnap.id, ...createdData };
 
-    return ok({ unique_id: uniqueId, position, message: "Product created.", product }, 201);
-  }catch(e){
+    return ok({ unique_id:uniqueId, position, message:"Product created.", product }, 201);
+
+  } catch(e){
     console.error("products_v2/create failed:", e);
-    return err(500,"Unexpected Error","Something went wrong while creating the product.");
+    return err(500,"Unexpected Error","Something went wrong while creating the product.",{
+      details:e.message
+    });
   }
 }

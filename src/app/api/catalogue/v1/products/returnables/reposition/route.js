@@ -1,67 +1,86 @@
-// app/api/returnables/reposition/route.js
 import { NextResponse } from "next/server";
 import { db } from "@/lib/firebase";
 import {
   collection, getDocs, doc, getDoc, writeBatch, serverTimestamp
 } from "firebase/firestore";
 
-const ok  =(p={},s=200)=>NextResponse.json({ ok:true, ...p },{ status:s });
-const err =(s,t,m,e={})=>NextResponse.json({ ok:false, title:t, message:m, ...e },{ status:s });
-const is8 =(s)=>/^\d{8}$/.test(String(s??"").trim());
+const ok  = (p={},s=200)=>NextResponse.json({ ok:true, data:{...p} },{ status:s });
+const err = (s,t,m,e={})=>NextResponse.json({ ok:false, title:t, message:m, ...e },{ status:s });
 
-const chunk=(arr,n)=>{ const out=[]; for(let i=0;i<arr.length;i+=n) out.push(arr.slice(i,i+n)); return out; };
+const chunk = (arr,n)=>{
+  const out = [];
+  for (let i=0;i<arr.length;i+=n) out.push(arr.slice(i,i+n));
+  return out;
+};
+
+const is8 = (s)=>/^\d{8}$/.test(String(s||"").trim());
 
 export async function POST(req){
   try{
-    const { returnable_id, position } = await req.json();
+    const body = await req.json().catch(()=>({}));
 
-    const rid = String(returnable_id ?? "").trim();
-    if (!is8(rid)) return err(400,"Invalid Returnable ID","'returnable_id' must be an 8-digit string.");
+    const returnable_id = String(body?.returnable_id ?? "").trim();
+    const direction     = String(body?.direction ?? "").toLowerCase();
 
-    const newPos = Math.max(1, parseInt(position,10) || 1);
+    if (!is8(returnable_id))
+      return err(400,"Invalid Returnable ID","'returnable_id' must be 8 digits.");
 
-    // Ensure target exists
-    const targetRef = doc(db,"returnables_v2", rid);
+    if (!["up","down"].includes(direction))
+      return err(400,"Invalid Direction","Direction must be 'up' or 'down'.");
+
+    // Ensure returnable exists
+    const targetRef = doc(db,"returnables_v2", returnable_id);
     const targetSnap = await getDoc(targetRef);
-    if (!targetSnap.exists()) return err(404,"Not Found",`No returnable with id '${rid}'.`);
 
-    // Load ALL returnables (in memory)
+    if (!targetSnap.exists())
+      return err(404,"Not Found",`No returnable with id '${returnable_id}'.`);
+
+    // Fetch ALL returnables (global ordering)
     const rs = await getDocs(collection(db,"returnables_v2"));
-    if (rs.empty) return err(409,"No Returnables","There are no returnables to reorder.");
+    if (rs.empty)
+      return err(404,"Empty","No returnables available.");
 
-    // Build an ordered list by placement.position asc (missing -> Infinity)
-    const list = rs.docs
-      .map(d => ({
-        id: d.id,
-        data: d.data() || {},
-        pos: Number.isFinite(+d.data()?.placement?.position)
-              ? +d.data().placement.position
-              : Number.POSITIVE_INFINITY
-      }))
-      .sort((a,b)=>a.pos - b.pos);
+    // Build normalized sortable list
+    const rows = rs.docs.map((d,i)=>({
+      id: d.id,
+      pos: Number.isFinite(+d.data()?.placement?.position)
+        ? +d.data().placement.position
+        : i+1
+    }))
+    .sort((a,b)=>a.pos - b.pos);
 
-    // If some positions were missing, normalize to 1..N first
-    list.forEach((row, idx) => { row.pos = idx + 1; });
+    const ids = rows.map(r=>r.id);
+    const fromIdx = ids.indexOf(returnable_id);
 
-    const ids = list.map(r => r.id);
-    const fromIdx = ids.indexOf(rid);
-    if (fromIdx < 0) return err(404,"Not Found","Returnable not found in ordering.");
+    if (fromIdx === -1)
+      return err(404,"Not Found","Returnable not in ordering.");
 
-    // Move to target index (0-based), clamp to [0..N-1]
+    const len = ids.length;
+
+    // wrap-around movement
+    const targetIdx =
+      direction === "up"
+        ? (fromIdx - 1 + len) % len
+        : (fromIdx + 1) % len;
+
+    // reorder list
     const arr = [...ids];
-    const item = arr.splice(fromIdx,1)[0];
-    const targetIdx = Math.min(Math.max(newPos,1), arr.length+1) - 1;
-    arr.splice(targetIdx,0,item);
+    const [moved] = arr.splice(fromIdx,1);
+    arr.splice(targetIdx,0,moved);
 
-    // Write back contiguous positions 1..N
+    // build position map (1..N)
+    const posMap = arr.reduce((acc,id,i)=>{
+      acc[id] = i + 1;
+      return acc;
+    },{});
+
+    // write back positions
     let affected = 0;
-    for (const part of chunk(arr, 400)) {
+    for (const part of chunk(arr,400)){
       const batch = writeBatch(db);
-      part.forEach((id, iPartIdx) => {
-        const absoluteIdx = arr.indexOf(id); // pos in full array
-        const pos = absoluteIdx + 1;
-        batch.update(doc(db,"returnables_v2", id), {
-          "placement.position": pos,
+      part.forEach(cid=>{
+        batch.update(doc(db,"returnables_v2",cid),{
+          "placement.position": posMap[cid],
           "timestamps.updatedAt": serverTimestamp()
         });
         affected++;
@@ -70,13 +89,17 @@ export async function POST(req){
     }
 
     return ok({
-      message: "Returnable repositioned.",
-      returnable_id: rid,
-      final_position: targetIdx + 1,
+      message: "Returnable nudged.",
+      returnable_id,
+      from_index: fromIdx,
+      final_index: targetIdx,
       affected
     });
-  }catch(e){
-    console.error("returnables/reposition failed:", e);
-    return err(500,"Unexpected Error","Failed to reposition returnable.");
+
+  } catch (e){
+    console.error("returnables/nudge failed:", e);
+    return err(500,"Unexpected Error","Failed to nudge returnable.",{
+      details: String(e?.message ?? "").slice(0,300)
+    });
   }
 }

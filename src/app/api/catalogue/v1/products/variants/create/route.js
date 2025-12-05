@@ -68,7 +68,9 @@ export async function POST(req){
 
     const current = psnap.data()||{};
     const variants = Array.isArray(current.variants)?[...current.variants]:[];
-    const nextPos=(variants.length?Math.max(...variants.map(v=>Number.isFinite(+v?.placement?.position)?+v.placement.position:0)):0)+1;
+    const nextPos=(variants.length
+      ?Math.max(...variants.map(v=>Number.isFinite(+v?.placement?.position)?+v.placement.position:0))
+      :0)+1;
 
     const variant={
       variant_id:vId,
@@ -76,13 +78,17 @@ export async function POST(req){
       label:toStr(data?.label),
       barcode:barcode,
       barcodeImageUrl: toStr(data?.barcodeImageUrl, null) || null,
+
       placement:{
-        position:Number.isFinite(+data?.placement?.position)?Math.trunc(+data.placement.position):nextPos,
+        position:Number.isFinite(+data?.placement?.position)
+          ?Math.trunc(+data.placement.position)
+          :nextPos,
         isActive:toBool(data?.placement?.isActive,true),
         isFeatured:toBool(data?.placement?.isFeatured,false),
         is_default:toBool(data?.placement?.is_default,variants.length===0),
         is_loyalty_eligible:toBool(data?.placement?.is_loyalty_eligible,true),
       },
+
       pricing:{
         supplier_price_excl:money2(data?.pricing?.supplier_price_excl),
         selling_price_excl:money2(data?.pricing?.selling_price_excl),
@@ -92,35 +98,61 @@ export async function POST(req){
         rebate_eligible:toBool(data?.pricing?.rebate_eligible,true),
         deposit_included:toBool(data?.pricing?.deposit_included,false),
       },
+
       sale:{
         is_on_sale:toBool(data?.sale?.is_on_sale,false),
+        disabled_by_admin:toBool(data?.sale?.disabled_by_admin,false),
         sale_price_excl:money2(data?.sale?.sale_price_excl),
         qty_available:toInt(data?.sale?.qty_available,0),
       },
+
       pack:{
         unit_count:toInt(data?.pack?.unit_count,1),
         volume:toNum(data?.pack?.volume,0),
         volume_unit:toStr(data?.pack?.volume_unit,"each"),
       },
+
+      /* ----------------------------------------------------
+         UPDATED RENTAL MODULE WITH new fields:
+         - limited_stock (default false)
+         - qty_available (default 0)
+      ----------------------------------------------------- */
       rental:{
         is_rental:toBool(data?.rental?.is_rental,false),
         rental_price_excl:money2(data?.rental?.rental_price_excl),
         billing_period:toStr(data?.rental?.billing_period,"monthly"),
+        limited_stock: toBool(data?.rental?.limited_stock, false),
+        qty_available: toInt(data?.rental?.qty_available, 0)
       },
-      returnable:typeof data?.returnable==="object"&&data.returnable?data.returnable:{},
+
+      returnable: typeof data?.returnable==="object" && data.returnable
+        ? data.returnable
+        : {},
+
       inventory: parseInventory(data?.inventory)
     };
 
+    /* Ensure only one is_default */
     if(variant.placement.is_default){
       for(let i=0;i<variants.length;i++){
-        if(variants[i]?.placement)variants[i].placement.is_default=false;
+        if(variants[i]?.placement) variants[i].placement.is_default=false;
       }
     }
 
     variants.push(variant);
-    await updateDoc(pref,{variants,"timestamps.updatedAt":serverTimestamp()});
 
-    return ok({message:"Variant added.",unique_id:pid,variant_id:vId,variant});
+    await updateDoc(pref,{
+      variants,
+      "timestamps.updatedAt":serverTimestamp()
+    });
+
+    return ok({
+      message:"Variant added.",
+      unique_id:pid,
+      variant_id:vId,
+      variant
+    });
+
   }catch(e){
     console.error("variant create failed:",e);
     return err(500,"Unexpected Error","Failed to add variant.");
