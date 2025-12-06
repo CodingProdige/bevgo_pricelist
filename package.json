@@ -12,7 +12,7 @@
     "@vercel/analytics": "^1.5.0",
     "bwip-js": "^4.8.0",
     "firebase": "^11.3.1",
-    "next": "15.1.7",
+    "next": "^16.0.7",
     "openai": "^6.9.1",
     "pngjs": "^7.0.0",
     "react": "^19.0.0",
