@@ -11,7 +11,7 @@ const err = (s,t,m,e={})=>NextResponse.json({ ok:false,title:t,message:m,...e },
 
 const now = () => new Date().toISOString();
 const VAT = 0.15;
-const r2 = (v) => Number((+v).toFixed(2));
+const r2 = v => Number((+v).toFixed(2));
 
 function computeLineTotals(v, qty){
   qty = Number(qty);
@@ -19,26 +19,29 @@ function computeLineTotals(v, qty){
   let price;
   if (v?.rental?.is_rental){
     price = r2(v.rental.rental_price_excl || 0);
-  } else if (v?.sale?.is_on_sale){
+  }
+  else if (v?.sale?.is_on_sale){
     price = r2(v.sale.sale_price_excl || 0);
-  } else {
+  }
+  else {
     price = r2(v.pricing?.selling_price_excl || 0);
   }
 
-  const base = price * qty;
-  const baseVat = base * VAT;
+  const base = r2(price * qty);
+  const baseVat = r2(base * VAT);
 
-  const returnablePrice = r2(v?.returnable?.pricing?.full_returnable_price_excl || 0);
-  const rtn = r2(returnablePrice * qty);
+  const rtnUnit = r2(v?.returnable?.pricing?.full_returnable_price_excl || 0);
+  const rtn = r2(rtnUnit * qty);
   const rtnVat = r2(rtn * VAT);
 
   return {
     unit_price_excl: price,
-    line_subtotal_excl: r2(base),
-    returnable_excl: r2(rtn),
+    line_subtotal_excl: base,
+    returnable_excl: rtn,
     total_vat: r2(baseVat + rtnVat),
     final_excl: r2(base + rtn),
-    final_incl: r2(base + rtn + baseVat + rtnVat)
+    final_incl: r2(base + rtn + baseVat + rtnVat),
+    sale_savings_excl: 0
   };
 }
 
@@ -57,6 +60,7 @@ function computeCartTotals(items){
     deposit  += lt.returnable_excl;
     vat_total+= lt.total_vat;
 
+    // track possible sale saving
     if (v?.sale?.is_on_sale){
       const normal = r2(v?.pricing?.selling_price_excl || 0);
       const sale   = r2(v?.sale?.sale_price_excl || 0);
@@ -66,16 +70,16 @@ function computeCartTotals(items){
     }
   }
 
-  const final_excl = subtotal + deposit;
-  const final_incl = final_excl + vat_total;
+  const final_excl = r2(subtotal + deposit);
+  const final_incl = r2(final_excl + vat_total);
 
   return {
     subtotal_excl: r2(subtotal),
     deposit_total_excl: r2(deposit),
     sale_savings_excl: r2(savings),
-    vat_total: r2(vat_total),
-    final_excl: r2(final_excl),
-    final_incl: r2(final_incl)
+    vat_total,
+    final_excl,
+    final_incl
   };
 }
 
@@ -90,15 +94,30 @@ export async function POST(req){
     const cartRef = doc(db,"carts", customerId);
     const cartSnap = await getDoc(cartRef);
 
-    /* ---------------- EMPTY CART ---------------- */
+    /* ------------------------------------------
+       🎯 CART DOES NOT EXIST → NEW EMPTY
+    ------------------------------------------- */
     if (!cartSnap.exists()){
       const emptyCart = {
         docId: customerId,
+        cart: {
+          cartId: customerId,
+          customerId,
+          channel: "unknown"
+        },
         items: [],
         totals: computeCartTotals([]),
-        timestamps: { createdAt: now(), updatedAt: now() },
-        cart_corrected: false,
         item_count: 0,
+        cart_corrected: false,
+        meta: {
+          lastAction: "",
+          notes: null,
+          source: "api"
+        },
+        timestamps: {
+          createdAt: now(),
+          updatedAt: now()
+        }
       };
 
       await setDoc(cartRef, emptyCart);
@@ -109,67 +128,131 @@ export async function POST(req){
       });
     }
 
-    /* ---------------- EXISTING CART ---------------- */
+    /* ------------------------------------------
+       🎯 CART EXISTS
+    ------------------------------------------- */
     const cart = cartSnap.data();
-    let items = Array.isArray(cart.items) ? cart.items : [];
+    const items = Array.isArray(cart.items) ? cart.items : [];
 
-    /* 🔥 LIVE HYDRATION FOR EACH ITEM 🔥 */
+    // Track warnings and removals
+    const warnings = { global: [], items: [] };
+    const productCache = new Map();
+    const kept = [];
+
+    /* ------------------------------------------
+       🔥 VALIDATE AGAINST ADMIN DISABLED SALES
+       (preserve stored snapshots otherwise)
+    ------------------------------------------- */
     for (const it of items){
-      const vSnap = it.selected_variant_snapshot;
-      const prodSnap = it.product_snapshot;
+      const vSnap = it?.selected_variant_snapshot;
+      const pSnap = it?.product_snapshot;
+      if (!vSnap || !pSnap) {
+        kept.push(it);
+        continue;
+      }
 
-      const productRef = doc(db,"products_v2", prodSnap.product.unique_id);
-      const dbProd = await getDoc(productRef);
-      if(!dbProd.exists()) continue;
+      const productId = pSnap.product?.unique_id;
+      if (!productId) {
+        kept.push(it);
+        continue;
+      }
 
-      const liveProd = dbProd.data();
-      const liveVar = liveProd.variants.find(v =>
-        String(v.variant_id) === String(vSnap.variant_id)
+      let liveProd = productCache.get(productId);
+      if (!liveProd) {
+        const productRef = doc(db,"products_v2", String(productId));
+        const prodSnap = await getDoc(productRef);
+        liveProd = prodSnap.exists() ? prodSnap.data() : null;
+        productCache.set(productId, liveProd);
+      }
+      if (!liveProd) {
+        kept.push(it);
+        continue;
+      }
+
+      const liveVar = (Array.isArray(liveProd.variants) ? liveProd.variants : []).find(v =>
+        String(v?.variant_id) === String(vSnap.variant_id)
       );
-      if(!liveVar) continue;
 
-      // Update live snapshot values
-      it.selected_variant_snapshot.sale = {
-        ...vSnap.sale,
-        qty_available: liveVar.sale?.qty_available ?? 0,
-        is_on_sale:    liveVar.sale?.is_on_sale ?? false
-      };
-      it.selected_variant_snapshot.rental = {
-        ...vSnap.rental,
-        qty_available: liveVar.rental?.qty_available ?? 0,
-        is_rental: liveVar.rental?.is_rental ?? false
-      };
+      // If sale disabled by admin and item was on sale in cart, drop it with warning
+      if (liveVar?.sale?.disabled_by_admin && vSnap?.sale?.is_on_sale){
+        warnings.items.push({
+          cart_item_key: it.cart_item_key || null,
+          variant_id: vSnap.variant_id || null,
+          message: "Removed sale item; sale has ended (disabled by admin)."
+        });
+        continue;
+      }
 
-      // Recalculate line totals using updated values
-      it.line_totals = computeLineTotals(
-        it.selected_variant_snapshot,
-        it.quantity
-      );
+      const clean = { ...it };
+
+      // If item was on sale in cart, preserve its snapshot/pricing
+      if (vSnap?.sale?.is_on_sale) {
+        clean.line_totals = computeLineTotals(clean.selected_variant_snapshot, clean.quantity);
+        kept.push(clean);
+        continue;
+      }
+
+      // For non-sale items, refresh variant pricing/sale/rental from live data to avoid hoarding stale prices
+      if (liveVar) {
+        const mergedVariant = {
+          ...vSnap,
+          ...liveVar,
+          pricing: liveVar.pricing ?? vSnap.pricing,
+          sale: {
+            ...(vSnap.sale || {}),
+            ...(liveVar.sale || {}),
+            is_on_sale: false
+          },
+          rental: liveVar.rental ?? vSnap.rental,
+          returnable: liveVar.returnable ?? vSnap.returnable,
+          pack: liveVar.pack ?? vSnap.pack
+        };
+
+        // Detect price change
+        const prevPrice = Number(vSnap?.pricing?.selling_price_excl) || 0;
+        const newPrice = Number(mergedVariant?.pricing?.selling_price_excl) || 0;
+        if (newPrice !== prevPrice) {
+          warnings.items.push({
+            cart_item_key: it.cart_item_key || null,
+            variant_id: vSnap.variant_id || null,
+            message: `Price updated from ${prevPrice} to ${newPrice}.`
+          });
+        }
+
+        clean.selected_variant_snapshot = mergedVariant;
+        clean.line_totals = computeLineTotals(mergedVariant, clean.quantity);
+        kept.push(clean);
+        continue;
+      }
+
+      // Fallback: keep as-is
+      clean.line_totals = computeLineTotals(clean.selected_variant_snapshot, clean.quantity);
+      kept.push(clean);
     }
 
-    /* ---------------- RECOMPUTE CART TOTALS ---------------- */
-    const recalculatedTotals = computeCartTotals(items);
+    /* ------------------------------------------
+       🔄 RECOMPUTE CART TOTALS
+    ------------------------------------------- */
+    const totals = computeCartTotals(kept);
 
-    const resultCart = {
+    const finalCart = {
       ...cart,
-      items,
-      totals: recalculatedTotals,
-      item_count: items.reduce((a,it)=>a+(it.quantity||0),0),
-      cart_corrected: false,
+      items: kept,
+      totals,
+      item_count: kept.reduce((a,it)=>a+(Number(it.quantity)||0),0),
+      cart_corrected: warnings.items.length>0,
+      warnings,
       timestamps: {
         ...cart.timestamps,
-        updatedAt: now(),
+        updatedAt: now()
       }
     };
 
-    await setDoc(cartRef, resultCart);
+    await setDoc(cartRef, finalCart);
 
     return ok({
-      cart: resultCart,
-      warnings: {
-        global: [],
-        items: []
-      }
+      cart: finalCart,
+      warnings
     });
 
   } catch (e){

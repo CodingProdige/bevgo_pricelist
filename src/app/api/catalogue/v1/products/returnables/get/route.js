@@ -59,12 +59,38 @@ export async function GET(req){
         return err(404, "No Returnable Assigned", `Variant '${byVariantId}' has no returnable assigned.`);
       }
 
-      // Return the assigned returnable in a 'data' object for single-item parity
+      // Resolve returnable id and fetch full doc
+      const rid =
+        String(r?.id || r?.returnable?.returnable_id || r?.returnable_id || r?.docId || "").trim();
+
+      if (!rid) {
+        return ok({
+          unique_id: found.unique_id,
+          variant_id: byVariantId,
+          variant_index: found.variant_index,
+          data: normalizeTimestamps(r),
+          warning: "No returnable id found on variant; returning inline snapshot."
+        });
+      }
+
+      const rref = doc(db, "returnables_v2", rid);
+      const rsnap = await getDoc(rref);
+      if (!rsnap.exists()) {
+        return ok({
+          unique_id: found.unique_id,
+          variant_id: byVariantId,
+          variant_index: found.variant_index,
+          data: normalizeTimestamps(r),
+          warning: `Returnable '${rid}' not found; returning inline snapshot.`
+        });
+      }
+
       return ok({
         unique_id: found.unique_id,
         variant_id: byVariantId,
         variant_index: found.variant_index,
-        data: normalizeTimestamps(r)
+        id: rsnap.id,
+        data: normalizeTimestamps(rsnap.data() || {})
       });
     }
 
