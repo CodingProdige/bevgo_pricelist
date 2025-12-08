@@ -30,7 +30,11 @@ function computeLineTotals(v, qty){
   const base = r2(price * qty);
   const baseVat = r2(base * VAT);
 
-  const rtnUnit = r2(v?.returnable?.pricing?.full_returnable_price_excl || 0);
+  const rtnUnit = r2(
+    v?.returnable?.pricing?.full_returnable_price_excl ??
+    v?.returnable?.data?.pricing?.full_returnable_price_excl ??
+    0
+  );
   const rtn = r2(rtnUnit * qty);
   const rtnVat = r2(rtn * VAT);
 

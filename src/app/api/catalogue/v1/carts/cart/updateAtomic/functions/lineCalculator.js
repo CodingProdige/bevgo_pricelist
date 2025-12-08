@@ -18,7 +18,11 @@ export function computeLineTotals(variant, qty) {
   const line_subtotal_excl = r2(unit * quantity);
   const item_vat = r2(line_subtotal_excl * VAT_RATE);
 
-  const returnable_unit = r2(variant?.returnable?.pricing?.full_returnable_price_excl || 0);
+  const returnable_unit = r2(
+    variant?.returnable?.pricing?.full_returnable_price_excl ??
+    variant?.returnable?.data?.pricing?.full_returnable_price_excl ??
+    0
+  );
   const returnable_excl = r2(returnable_unit * quantity);
   const returnable_vat = r2(returnable_excl * VAT_RATE);
 
