@@ -1,0 +1,25 @@
+{
+    "crons": [
+      {
+        "path": "/api/catalogue/v1/integrations/shopify/bulk-sync?secret=bevgo-9a2bdf1d-4723-4e58-9c7f-29d8b45b2c99",
+        "schedule": "0 * * * *"
+      },
+      {
+        "path": "/api/catalogue/v1/integrations/shopify/bulk-sync?phase=media&secret=bevgo-9a2bdf1d-4723-4e58-9c7f-29d8b45b2c99",
+        "schedule": "10 * * * *"
+      },
+      {
+        "path": "/api/catalogue/v1/integrations/shopify/sync?scope=categories&secret=bevgo-9a2bdf1d-4723-4e58-9c7f-29d8b45b2c99",
+        "schedule": "0 2 * * *"
+      },
+      {
+        "path": "/api/catalogue/v1/integrations/shopify/sync?scope=subCategories&secret=bevgo-9a2bdf1d-4723-4e58-9c7f-29d8b45b2c99",
+        "schedule": "10 2 * * *"
+      },
+      {
+        "path": "/api/catalogue/v1/integrations/shopify/sync?scope=brands&secret=bevgo-9a2bdf1d-4723-4e58-9c7f-29d8b45b2c99",
+        "schedule": "20 2 * * *"
+      }
+    ]
+  }
+  
