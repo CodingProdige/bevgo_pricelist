@@ -43,6 +43,8 @@ const ACCEPTED_IMAGE_TYPES = new Set([
   "image/gif",
   "image/webp",
 ]);
+const VARIANT_META_NAMESPACE = "mm-google-shopping";
+const VARIANT_META_TYPE = "single_line_text_field";
 
 async function normalizeImagesForBulk(media, altText) {
   if (!Array.isArray(media?.images)) return [];
@@ -94,12 +96,14 @@ async function normalizeImagesForBulk(media, altText) {
 function buildGoogleCategory(grouping) {
   const category = (grouping?.category || "").toLowerCase();
   const subCategory = (grouping?.subCategory || "").toLowerCase();
+  const brand = (grouping?.brand || "").toLowerCase();
 
   const has = (s) => subCategory.includes(s);
 
   if (category === "water" || has("water")) {
     return {
       googleProductCategory: "Food, Beverages & Tobacco > Beverages > Water",
+      googleCategoryId: "2551",
       productType: "Beverages > Water",
     };
   }
@@ -109,6 +113,7 @@ function buildGoogleCategory(grouping) {
       return {
         googleProductCategory:
           "Food, Beverages & Tobacco > Beverages > Soft Drinks",
+        googleCategoryId: "2556",
         productType: "Beverages > Soft Drinks",
       };
     }
@@ -116,6 +121,7 @@ function buildGoogleCategory(grouping) {
       return {
         googleProductCategory:
           "Food, Beverages & Tobacco > Beverages > Juice",
+        googleCategoryId: "2557",
         productType: "Beverages > Juice",
       };
     }
@@ -123,6 +129,7 @@ function buildGoogleCategory(grouping) {
       return {
         googleProductCategory:
           "Food, Beverages & Tobacco > Beverages > Soft Drinks",
+        googleCategoryId: "2559",
         productType: "Beverages > Tonic Water",
       };
     }
@@ -130,11 +137,13 @@ function buildGoogleCategory(grouping) {
       return {
         googleProductCategory:
           "Food, Beverages & Tobacco > Beverages > Water",
+        googleCategoryId: "2551",
         productType: "Beverages > Water",
       };
     }
     return {
       googleProductCategory: "Food, Beverages & Tobacco > Beverages",
+      googleCategoryId: "2559",
       productType: "Beverages > Mixers",
     };
   }
@@ -143,6 +152,7 @@ function buildGoogleCategory(grouping) {
     return {
       googleProductCategory:
         "Food, Beverages & Tobacco > Beverages > Alcoholic Beverages",
+      googleCategoryId: "188",
       productType: "Beverages > Alcoholic Beverages",
     };
   }
@@ -150,12 +160,74 @@ function buildGoogleCategory(grouping) {
   if (category === "gas") {
     return {
       googleProductCategory: "Business & Industrial > Industrial Storage",
+      googleCategoryId: null,
       productType: "Industrial > Gas",
+    };
+  }
+
+  if (category === "mixers" && has("energy")) {
+    return {
+      googleProductCategory:
+        "Food, Beverages & Tobacco > Beverages > Energy Drinks",
+      googleCategoryId: "2562",
+      productType: "Beverages > Energy Drinks",
+    };
+  }
+
+  if (has("energy") || brand.includes("monster")) {
+    return {
+      googleProductCategory:
+        "Food, Beverages & Tobacco > Beverages > Energy Drinks",
+      googleCategoryId: "2562",
+      productType: "Beverages > Energy Drinks",
+    };
+  }
+
+  if (has("sports") || brand.includes("powerade")) {
+    return {
+      googleProductCategory:
+        "Food, Beverages & Tobacco > Beverages > Sports Drinks",
+      googleCategoryId: "2563",
+      productType: "Beverages > Sports Drinks",
+    };
+  }
+
+  if (has("beer") || has("cider")) {
+    return {
+      googleProductCategory: "Food, Beverages & Tobacco > Beverages > Beer",
+      googleCategoryId: "2568",
+      productType: "Beverages > Beer",
+    };
+  }
+
+  if (has("wine")) {
+    return {
+      googleProductCategory: "Food, Beverages & Tobacco > Beverages > Wine",
+      googleCategoryId: "2572",
+      productType: "Beverages > Wine",
+    };
+  }
+
+  if (has("spirits") || has("liqueur") || has("campari")) {
+    return {
+      googleProductCategory: "Food, Beverages & Tobacco > Beverages > Spirits",
+      googleCategoryId: "2570",
+      productType: "Beverages > Spirits",
+    };
+  }
+
+  if (has("rtd") || has("ready") || has("cocktail")) {
+    return {
+      googleProductCategory:
+        "Food, Beverages & Tobacco > Beverages > Ready-to-Drink Cocktails",
+      googleCategoryId: "2569",
+      productType: "Beverages > RTD",
     };
   }
 
   return {
     googleProductCategory: "Food, Beverages & Tobacco > Beverages",
+    googleCategoryId: "2559",
     productType: "Beverages",
   };
 }
@@ -201,7 +273,9 @@ function buildProductInput(docId, data, existingVariants = []) {
   if (!placement?.in_stock) tagSet.add("out_of_stock");
   tagSet.add(`bevgo_fid:${docId}`);
 
-  const { googleProductCategory, productType } = buildGoogleCategory(grouping);
+  const { googleProductCategory, googleCategoryId, productType } =
+    buildGoogleCategory(grouping);
+  const isLiquor = (grouping?.category || "").toLowerCase() === "liquor";
 
   const optionName = "Title";
   const optionValueNames = [];
@@ -211,8 +285,8 @@ function buildProductInput(docId, data, existingVariants = []) {
   for (const v of variants) {
     const label = (v?.label || "").trim().toLowerCase();
     const sku = (v?.sku || "").trim().toLowerCase();
-    const key = sku ? `sku:${sku}` : `label:${label}`;
-    if (seenVariantKeys.has(key)) continue;
+    const key = label ? `label:${label}` : sku ? `sku:${sku}` : null;
+    if (!key || seenVariantKeys.has(key)) continue;
     seenVariantKeys.add(key);
     normalizedVariants.push(v);
   }
@@ -227,6 +301,7 @@ function buildProductInput(docId, data, existingVariants = []) {
     if (labelKey) byLabel.set(labelKey, v.id);
   }
 
+  const variantMetafields = [];
   const shopifyVariants = normalizedVariants.map((v, index) => {
     const baseExcl = v?.pricing?.selling_price_excl;
     const baseIncl =
@@ -255,7 +330,7 @@ function buildProductInput(docId, data, existingVariants = []) {
     const labelKey = label.trim().toLowerCase();
     const existingId = (skuKey && bySku.get(skuKey)) || byLabel.get(labelKey);
 
-    return {
+    const variantInput = {
       ...(existingId ? { id: existingId } : {}),
       optionValues: [{ optionName, name: label }],
       price: Number(price).toFixed(2),
@@ -265,7 +340,55 @@ function buildProductInput(docId, data, existingVariants = []) {
           : undefined,
       sku: v.sku || `FIRESTORE-${docId}-${index + 1}`,
       barcode: v.barcode || undefined,
+      inventoryPolicy: "CONTINUE",
+      inventoryItem: {
+        tracked: false,
+        countryCodeOfOrigin: "ZA",
+      },
     };
+
+    if (existingId) {
+      const fields = [
+        {
+          ownerId: existingId,
+          namespace: VARIANT_META_NAMESPACE,
+          key: "condition",
+          type: VARIANT_META_TYPE,
+          value: "New",
+        },
+        {
+          ownerId: existingId,
+          namespace: VARIANT_META_NAMESPACE,
+          key: "gender",
+          type: VARIANT_META_TYPE,
+          value: "Unisex",
+        },
+      ];
+
+      if (isLiquor) {
+        fields.push({
+          ownerId: existingId,
+          namespace: VARIANT_META_NAMESPACE,
+          key: "age_group",
+          type: VARIANT_META_TYPE,
+          value: "Adult",
+        });
+      }
+
+      if (v?.sku) {
+        fields.push({
+          ownerId: existingId,
+          namespace: VARIANT_META_NAMESPACE,
+          key: "mpn",
+          type: VARIANT_META_TYPE,
+          value: v.sku,
+        });
+      }
+
+      variantMetafields.push(fields);
+    }
+
+    return variantInput;
   });
 
   const productOptions = [
@@ -276,29 +399,56 @@ function buildProductInput(docId, data, existingVariants = []) {
   ];
 
   return {
-    title: product.title,
-    descriptionHtml: desc,
-    vendor: grouping.brand,
-    handle: buildHandle(product.title),
-    tags: Array.from(tagSet),
-    productOptions,
-    variants: shopifyVariants,
-    productType,
-    status: forceDraft || placement?.isActive === false ? "DRAFT" : "ACTIVE",
-    metafields: [
-      {
-        namespace: "global",
-        key: "condition",
-        type: "single_line_text_field",
-        value: "new",
+    input: {
+      title: product.title,
+      descriptionHtml: desc,
+      vendor: grouping.brand,
+      handle: buildHandle(product.title),
+      tags: Array.from(tagSet),
+      productOptions,
+      variants: shopifyVariants,
+      productType,
+      seo: {
+        title: product.title,
+        description: desc,
       },
-      {
-        namespace: "google",
-        key: "google_product_category",
-        type: "single_line_text_field",
-        value: googleProductCategory,
-      },
-    ],
+      status: forceDraft || placement?.isActive === false ? "DRAFT" : "ACTIVE",
+      metafields: [
+        {
+          namespace: "global",
+          key: "condition",
+          type: "single_line_text_field",
+          value: "New",
+        },
+        {
+          namespace: "google",
+          key: "google_product_category",
+          type: "single_line_text_field",
+          value: googleProductCategory,
+        },
+        ...(googleCategoryId
+          ? [
+              {
+                namespace: "mm-google-shopping",
+                key: "google_product_category",
+                type: "single_line_text_field",
+                value: String(googleCategoryId),
+              },
+            ]
+          : []),
+        ...(isLiquor
+          ? [
+              {
+                namespace: "google",
+                key: "age_group",
+                type: "single_line_text_field",
+                value: "Adult",
+              },
+            ]
+          : []),
+      ],
+    },
+    variantMetafields,
   };
 }
 
@@ -350,6 +500,53 @@ async function fetchShopifyProductsByTag(tag) {
   } while (cursor);
 
   return products;
+}
+
+async function fetchRecentProductsMissingImages(limit = 3, pageSize = 50, sinceISO = null) {
+  const missing = [];
+  let cursor = null;
+
+  const queryFilter = sinceISO
+    ? `tag:bevgo_source updated_at:>=${sinceISO}`
+    : "tag:bevgo_source";
+
+  const query = `
+    query Products($cursor: String, $query: String) {
+      products(first: ${pageSize}, after: $cursor, query: $query, sortKey: UPDATED_AT, reverse: true) {
+        pageInfo { hasNextPage }
+        edges {
+          cursor
+          node {
+            id
+            handle
+            tags
+            images(first: 1) { edges { node { id } } }
+          }
+        }
+      }
+    }
+  `;
+
+  while (missing.length < limit) {
+    const data = await shopifyGraphQL(query, {
+      cursor,
+      query: queryFilter,
+    });
+
+    const page = data?.products?.edges || [];
+    for (const edge of page) {
+      const node = edge.node;
+      const hasImage = (node?.images?.edges || []).length > 0;
+      if (!hasImage) missing.push(node);
+      if (missing.length >= limit) break;
+    }
+
+    if (!data?.products?.pageInfo?.hasNextPage) break;
+    cursor = page[page.length - 1]?.cursor;
+    if (!cursor) break;
+  }
+
+  return missing;
 }
 
 function extractFidFromTags(tags = []) {
@@ -474,9 +671,34 @@ export async function POST(req) {
     const updateLines = [];
     const deleteLines = [];
     const mediaLines = [];
+    const variantMetafieldLines = [];
     const shouldPrepareMedia = phase === "media";
     const handleOnly = phase === "handles";
+    const variantMetaOnly = phase === "variant-meta";
     let mediaPlanned = 0;
+    let mediaTargetIds = null;
+
+    if (shouldPrepareMedia) {
+      const sinceISO = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+      const recentMissing = await fetchRecentProductsMissingImages(3, 50, sinceISO);
+      mediaTargetIds = new Set(recentMissing.map((p) => p.id));
+      if (mediaTargetIds.size === 0) {
+        return ok({
+          message: "No recent products missing images.",
+          data: {
+            created: 0,
+            updated: 0,
+            deleted: 0,
+            media: 0,
+            mediaPlanned: 0,
+            operations: {},
+          },
+        });
+      }
+      console.log(
+        `[bulk-sync] media targets (missing images): ${mediaTargetIds.size}`
+      );
+    }
 
     for (const [docId, data] of firestore.entries()) {
       const matches = shopifyByFid.get(docId) || [];
@@ -484,17 +706,39 @@ export async function POST(req) {
       const existingVariants =
         matches[0]?.variants?.edges?.map((e) => e.node) || [];
 
-      const input = buildProductInput(docId, data, existingVariants);
-      if (!input) continue;
+      const built = buildProductInput(docId, data, existingVariants);
+      if (!built) continue;
+      const { input, variantMetafields } = built;
+
+      if (variantMetaOnly) {
+        for (const fields of variantMetafields) {
+          if (!fields?.length) continue;
+          variantMetafieldLines.push(JSON.stringify({ metafields: fields }));
+        }
+        continue;
+      }
 
       let images = [];
       if (shouldPrepareMedia) {
+        if (!existingId || !mediaTargetIds?.has(existingId)) continue;
         images = await normalizeImagesForBulk(data.media, input.title);
       } else if (existingId && data?.media?.images?.length) {
         mediaPlanned += data.media.images.length;
       }
 
       if (existingId) {
+        if (shouldPrepareMedia) {
+          if (images.length) {
+            mediaLines.push(
+              JSON.stringify({
+                productId: existingId,
+                media: images,
+              })
+            );
+          }
+          continue;
+        }
+
         const existingHandle = matches[0]?.handle || "";
         const shouldUpdateHandle = input.handle !== existingHandle;
         if (!handleOnly || shouldUpdateHandle) {
@@ -547,6 +791,7 @@ export async function POST(req) {
       updated: updateLines.length,
       deleted: deleteLines.length,
       media: mediaLines.length,
+      variantMetafields: variantMetafieldLines.length,
       mediaPlanned,
       operations: {},
     };
@@ -572,6 +817,15 @@ export async function POST(req) {
           updateLines.join("\n")
         );
         results.operations.update = run;
+      }
+    } else if (phase === "variant-meta") {
+      if (variantMetafieldLines.length) {
+        console.log("[bulk-sync] running bulk variant metafields");
+        const run = await runBulkMutation(
+          'mutation call($metafields: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $metafields) { metafields { id } userErrors { field message } } }',
+          variantMetafieldLines.join("\n")
+        );
+        results.operations.variantMetafields = run;
       }
     } else if (phase === "media") {
       if (mediaLines.length) {

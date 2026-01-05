@@ -6,7 +6,7 @@
       },
       {
         "path": "/api/catalogue/v1/integrations/shopify/bulk-sync?phase=media&secret=bevgo-9a2bdf1d-4723-4e58-9c7f-29d8b45b2c99",
-        "schedule": "10 * * * *"
+        "schedule": "*/30 * * * *"
       },
       {
         "path": "/api/catalogue/v1/integrations/shopify/sync?scope=categories&secret=bevgo-9a2bdf1d-4723-4e58-9c7f-29d8b45b2c99",

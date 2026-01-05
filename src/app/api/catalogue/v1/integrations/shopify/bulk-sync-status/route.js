@@ -53,6 +53,38 @@ async function fetchBulkOperationById(id) {
   return data.node;
 }
 
+function collectUserErrors(row) {
+  const errors = [];
+
+  const visit = (node, path) => {
+    if (!node) return;
+    if (Array.isArray(node)) {
+      node.forEach((item, idx) => visit(item, `${path}[${idx}]`));
+      return;
+    }
+    if (typeof node !== "object") return;
+
+    for (const [key, value] of Object.entries(node)) {
+      if ((key === "userErrors" || key === "mediaUserErrors") && Array.isArray(value)) {
+        for (const err of value) {
+          if (!err) continue;
+          errors.push({
+            path,
+            type: key,
+            field: err.field || null,
+            message: err.message || String(err),
+          });
+        }
+        continue;
+      }
+      visit(value, path ? `${path}.${key}` : key);
+    }
+  };
+
+  visit(row, "");
+  return errors;
+}
+
 export async function GET(req) {
   try {
     const url = new URL(req.url);
@@ -114,12 +146,14 @@ export async function GET(req) {
       const failures = rows.filter(
         (r) => r?.__typename === "BulkOperationError"
       );
+      const userErrors = rows.flatMap(collectUserErrors);
 
       results.push({
         status: op.status,
         completedAt: op.completedAt,
         totalObjects: op.objectCount,
         errors: failures,
+        userErrors,
         resultsUrl: op.url,
         operationId: op.id,
       });
