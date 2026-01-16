@@ -11,6 +11,7 @@ const err = (s,t,m,e={})=>NextResponse.json({ ok:false,title:t,message:m,...e },
 
 const now = () => new Date().toISOString();
 const VAT = 0.15;
+const DELIVERY_FEE_URL = "https://bevgo-client.vercel.app/api/v1/delivery/fee";
 const r2 = v => Number((+v).toFixed(2));
 
 function computeLineTotals(v, qty){
@@ -49,11 +50,12 @@ function computeLineTotals(v, qty){
   };
 }
 
-function computeCartTotals(items){
+function computeCartTotals(items, deliveryFee = 0){
   let subtotal = 0;
   let deposit  = 0;
   let savings  = 0;
   let vat_total = 0;
+  const delivery = Number(deliveryFee) || 0;
 
   for (const it of items){
     const v = it.selected_variant_snapshot;
@@ -74,12 +76,13 @@ function computeCartTotals(items){
     }
   }
 
-  const final_excl = r2(subtotal + deposit);
+  const final_excl = r2(subtotal + deposit + delivery);
   const final_incl = r2(final_excl + vat_total);
 
   return {
     subtotal_excl: r2(subtotal),
     deposit_total_excl: r2(deposit),
+    delivery_fee_excl: r2(delivery),
     sale_savings_excl: r2(savings),
     vat_total,
     final_excl,
@@ -87,13 +90,125 @@ function computeCartTotals(items){
   };
 }
 
+function hasDeliveryAddress(address){
+  if (!address || typeof address !== "object") return false;
+  return Object.values(address).some((v) => {
+    if (typeof v === "string") return v.trim().length > 0;
+    return v != null;
+  });
+}
+
+async function fetchDeliveryFee(address, userId){
+  if (!hasDeliveryAddress(address)) {
+    return { amount: 0, meta: null };
+  }
+
+  try {
+    const payload = JSON.stringify({
+      address,
+      userId: userId || null
+    });
+    const urls = DELIVERY_FEE_URL.endsWith("/")
+      ? [DELIVERY_FEE_URL.slice(0, -1), DELIVERY_FEE_URL]
+      : [DELIVERY_FEE_URL, `${DELIVERY_FEE_URL}/`];
+
+    let res = null;
+    let lastBody = null;
+    let tried = [];
+
+    for (const url of urls) {
+      tried.push(url);
+      res = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Accept": "application/json"
+        },
+        cache: "no-store",
+        redirect: "manual",
+        body: payload
+      });
+
+      if (res.status >= 300 && res.status < 400) {
+        const location = res.headers.get("location");
+        if (location) {
+          tried.push(location);
+          res = await fetch(location, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Accept": "application/json"
+            },
+            cache: "no-store",
+            body: payload
+          });
+        }
+      }
+
+      const text = await res.text();
+      lastBody = text;
+      let json = null;
+      try {
+        json = text ? JSON.parse(text) : null;
+      } catch {
+        json = null;
+      }
+
+      if (!res.ok) {
+        if (res.status === 405) {
+          continue;
+        }
+        return {
+          amount: 0,
+          meta: {
+            ok: false,
+            status: res.status,
+            body: json ?? text ?? null,
+            tried
+          }
+        };
+      }
+
+      if (json && json.ok === false) {
+        return { amount: 0, meta: json };
+      }
+
+      const amount = Number(json?.fee?.amount || 0);
+      return { amount, meta: json };
+    }
+
+    return {
+      amount: 0,
+      meta: {
+        ok: false,
+        status: res?.status || 405,
+        body: lastBody ?? null,
+        tried
+      }
+    };
+  } catch (e) {
+    return {
+      amount: 0,
+      meta: {
+        ok: false,
+        error: String(e)
+      }
+    };
+  }
+}
+
 /* ------------------ MAIN ENDPOINT ------------------- */
 
 export async function POST(req){
   try {
-    const { customerId } = await req.json();
+    const { customerId, deliveryAddress } = await req.json();
     if (!customerId)
       return err(400,"Invalid Request","customerId is required.");
+
+    const { amount: deliveryFee, meta: deliveryMeta } = await fetchDeliveryFee(
+      deliveryAddress,
+      customerId
+    );
 
     const cartRef = doc(db,"carts", customerId);
     const cartSnap = await getDoc(cartRef);
@@ -110,7 +225,7 @@ export async function POST(req){
           channel: "unknown"
         },
         items: [],
-        totals: computeCartTotals([]),
+        totals: computeCartTotals([], deliveryFee),
         item_count: 0,
         cart_corrected: false,
         meta: {
@@ -128,6 +243,8 @@ export async function POST(req){
 
       return ok({
         cart: emptyCart,
+        has_rental_items: false,
+        delivery_fee: { amount: deliveryFee, meta: deliveryMeta },
         warnings: { global: [], items: [] }
       });
     }
@@ -237,7 +354,10 @@ export async function POST(req){
     /* ------------------------------------------
        🔄 RECOMPUTE CART TOTALS
     ------------------------------------------- */
-    const totals = computeCartTotals(kept);
+    const totals = computeCartTotals(kept, deliveryFee);
+    const hasRentalItems = kept.some(
+      (it) => it?.selected_variant_snapshot?.rental?.is_rental
+    );
 
     const finalCart = {
       ...cart,
@@ -256,6 +376,8 @@ export async function POST(req){
 
     return ok({
       cart: finalCart,
+      has_rental_items: hasRentalItems,
+      delivery_fee: { amount: deliveryFee, meta: deliveryMeta },
       warnings
     });
 

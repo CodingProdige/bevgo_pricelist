@@ -5,8 +5,20 @@
         "schedule": "0 * * * *"
       },
       {
+        "path": "/api/catalogue/v1/integrations/shopify/bulk-sync?phase=variant-meta&secret=bevgo-9a2bdf1d-4723-4e58-9c7f-29d8b45b2c99",
+        "schedule": "15 * * * *"
+      },
+      {
         "path": "/api/catalogue/v1/integrations/shopify/bulk-sync?phase=media&secret=bevgo-9a2bdf1d-4723-4e58-9c7f-29d8b45b2c99",
         "schedule": "*/30 * * * *"
+      },
+      {
+        "path": "/api/catalogue/v1/integrations/shopify/bulk-sync?phase=handles&secret=bevgo-9a2bdf1d-4723-4e58-9c7f-29d8b45b2c99",
+        "schedule": "5 3 * * *"
+      },
+      {
+        "path": "/api/catalogue/v1/integrations/shopify/bulk-publish?secret=bevgo-9a2bdf1d-4723-4e58-9c7f-29d8b45b2c99",
+        "schedule": "20 3 * * *"
       },
       {
         "path": "/api/catalogue/v1/integrations/shopify/sync?scope=categories&secret=bevgo-9a2bdf1d-4723-4e58-9c7f-29d8b45b2c99",
