@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/firebase";
-import { doc, getDoc, collection, getDocs, query, where, orderBy, limit as qLimit } from "firebase/firestore";
+import { doc, getDoc, collection, getDocs, query, where } from "firebase/firestore";
 
 const ok  =(p={},s=200)=>NextResponse.json({ ok:true, ...p },{ status:s });
 const err =(s,t,m,e={})=>NextResponse.json({ ok:false, title:t, message:m, ...e },{ status:s });
@@ -30,10 +30,6 @@ export async function GET(req){
     const isActive   = toBool(searchParams.get("isActive"));
     const isFeatured = toBool(searchParams.get("isFeatured"));
 
-    const filters = [];
-    if (isActive!==null)   filters.push(where("placement.isActive","==",isActive));
-    if (isFeatured!==null) filters.push(where("placement.isFeatured","==",isFeatured));
-
     const limRaw = (searchParams.get("limit")||"").trim();
     const unlimited = limRaw.toLowerCase() === "all";
     let lim = 24;
@@ -43,11 +39,25 @@ export async function GET(req){
     }
 
     const col = collection(db,"categories");
-    const base = [ ...filters, orderBy("placement.position","asc") ];
-    const qy   = unlimited ? query(col, ...base) : query(col, ...base, qLimit(lim));
-    const rs   = await getDocs(qy);
+    const rs  = await getDocs(col);
 
-    const items = rs.docs.map(d=>({ id:d.id, data:d.data()||{} }));
+    let items = rs.docs.map(d=>({ id:d.id, data:d.data()||{} }));
+    items = items.filter(({ data })=>{
+      if (isActive !== null && !!data?.placement?.isActive !== isActive) return false;
+      if (isFeatured !== null && !!data?.placement?.isFeatured !== isFeatured) return false;
+      return true;
+    });
+
+    items.sort((a,b)=>{
+      const ap = Number(a?.data?.placement?.position ?? Number.POSITIVE_INFINITY);
+      const bp = Number(b?.data?.placement?.position ?? Number.POSITIVE_INFINITY);
+      return ap - bp;
+    });
+
+    if (!unlimited){
+      items = items.slice(0, lim);
+    }
+
     return ok({ count: items.length, items });
   } catch (e) {
     const hint = /FAILED_PRECONDITION|PERMISSION_DENIED/i.test(String(e?.message||""))

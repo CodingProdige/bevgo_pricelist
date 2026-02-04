@@ -166,6 +166,22 @@ export async function GET(req){
     }
 
     const count = items.length;
+    let relatedBrands = null;
+    if (subCategory){
+      relatedBrands = snapAll.docs
+        .map(d=>({ id:d.id, data:d.data()||{} }))
+        .filter(row => {
+          const subs = Array.isArray(row.data?.grouping?.subCategories)
+            ? row.data.grouping.subCategories
+            : [];
+          return subs.includes(subCategory);
+        })
+        .sort((a,b)=>{
+          const ap = Number.isFinite(+a.data?.placement?.position) ? +a.data.placement.position : Number.POSITIVE_INFINITY;
+          const bp = Number.isFinite(+b.data?.placement?.position) ? +b.data.placement.position : Number.POSITIVE_INFINITY;
+          return ap - bp;
+        });
+    }
 
     // 5) optional grouping
     if (groupBy === "category"){
@@ -178,7 +194,11 @@ export async function GET(req){
       const groups = Array.from(map.entries())
         .sort(([a],[b])=>a.localeCompare(b))
         .map(([key, items])=>({ key, items }));
-      return ok({ count, groups });
+      return ok({
+        count,
+        groups,
+        ...(relatedBrands ? { related_brands: relatedBrands } : {})
+      });
     }
 
     if (groupBy === "subcategory"){
@@ -194,11 +214,19 @@ export async function GET(req){
       const groups = Array.from(map.entries())
         .sort(([a],[b])=>a.localeCompare(b))
         .map(([key, items])=>({ key, items }));
-      return ok({ count, groups });
+      return ok({
+        count,
+        groups,
+        ...(relatedBrands ? { related_brands: relatedBrands } : {})
+      });
     }
 
     // default: flat list
-    return ok({ count, items });
+    return ok({
+      count,
+      items,
+      ...(relatedBrands ? { related_brands: relatedBrands } : {})
+    });
   }catch(e){
     console.error("brands/get failed:", e);
     return err(

@@ -2,6 +2,7 @@ export const runtime = "nodejs";
 
 import { NextResponse } from "next/server";
 import { db } from "@/lib/firebase";
+import { clientDb } from "@/lib/clientFirebase";
 import { doc, getDoc, setDoc } from "firebase/firestore";
 
 /* ------------------ HELPERS ------------------- */
@@ -13,6 +14,7 @@ const now = () => new Date().toISOString();
 const VAT = 0.15;
 const DELIVERY_FEE_URL = "https://bevgo-client.vercel.app/api/v1/delivery/fee";
 const r2 = v => Number((+v).toFixed(2));
+const REBATE_TIER_MAX_CAP = 5;
 
 function computeLineTotals(v, qty){
   qty = Number(qty);
@@ -88,6 +90,38 @@ function computeCartTotals(items, deliveryFee = 0){
     final_excl,
     final_incl
   };
+}
+
+function resolveVolumeRebatePercent(subtotalExcl){
+  const total = Number(subtotalExcl) || 0;
+  if (total >= 200000) return 8;
+  if (total >= 100000) return 5;
+  if (total >= 50000) return 3;
+  if (total >= 25000) return 2;
+  if (total >= 10000) return 1;
+  return 0;
+}
+
+function computePricingAdjustments(subtotalExcl, pricing){
+  const discountPercentage = Number(pricing?.discountPercentage) || 0;
+  const rebateEligible = Boolean(pricing?.rebate?.rebateEligible);
+  const tierLocked = Boolean(pricing?.rebate?.tierLocked);
+  const tierValue = Number(pricing?.rebate?.tier) || 0;
+
+  if (discountPercentage > 0){
+    const pct = Math.min(discountPercentage, 100);
+    return { type: "discount", percent: pct, amountExcl: r2(subtotalExcl * (pct / 100)) };
+  }
+
+  if (!rebateEligible){
+    return { type: "none", percent: 0, amountExcl: 0 };
+  }
+
+  const tierCap = tierValue > 0 ? Math.min(tierValue, REBATE_TIER_MAX_CAP) : REBATE_TIER_MAX_CAP;
+  const volumePercent = resolveVolumeRebatePercent(subtotalExcl);
+  const pct = tierLocked ? tierCap : Math.min(volumePercent, tierCap);
+
+  return { type: "rebate", percent: pct, amountExcl: r2(subtotalExcl * (pct / 100)) };
 }
 
 function hasDeliveryAddress(address){
@@ -201,7 +235,7 @@ async function fetchDeliveryFee(address, userId){
 
 export async function POST(req){
   try {
-    const { customerId, deliveryAddress } = await req.json();
+    const { customerId, deliveryAddress, useCredit } = await req.json();
     if (!customerId)
       return err(400,"Invalid Request","customerId is required.");
 
@@ -209,6 +243,11 @@ export async function POST(req){
       deliveryAddress,
       customerId
     );
+
+    const userRef = doc(clientDb, "users", customerId);
+    const userSnap = await getDoc(userRef);
+    const userData = userSnap.exists() ? userSnap.data() : null;
+    const useCreditFlag = useCredit === true || useCredit === "true";
 
     const cartRef = doc(db,"carts", customerId);
     const cartSnap = await getDoc(cartRef);
@@ -225,7 +264,6 @@ export async function POST(req){
           channel: "unknown"
         },
         items: [],
-        totals: computeCartTotals([], deliveryFee),
         item_count: 0,
         cart_corrected: false,
         meta: {
@@ -239,10 +277,40 @@ export async function POST(req){
         }
       };
 
-      await setDoc(cartRef, emptyCart);
+      const emptyTotals = computeCartTotals([], deliveryFee);
+      const adjust = computePricingAdjustments(emptyTotals.subtotal_excl, userData?.pricing);
+      const discountedExcl = r2(emptyTotals.final_excl - adjust.amountExcl);
+      const discountedIncl = r2(discountedExcl + emptyTotals.vat_total);
+      const creditAvailable = Number(userData?.credit?.availableCredit) || 0;
+      const creditApplied = useCreditFlag && creditAvailable > 0 ? creditAvailable : 0;
+
+      const emptyCartWithPricing = {
+        ...emptyCart,
+        totals: {
+          ...emptyTotals,
+          base_final_excl: emptyTotals.final_excl,
+          base_final_incl: emptyTotals.final_incl,
+          pricing_adjustment: {
+            type: adjust.type,
+            percent: adjust.percent,
+            amount_excl: adjust.amountExcl
+          },
+          final_excl_after_discount: discountedExcl,
+          final_incl_after_discount: discountedIncl,
+          credit: {
+            available: creditAvailable,
+            applied: creditApplied,
+            final_payable_incl: r2(discountedIncl - creditApplied)
+          },
+          final_excl: discountedExcl,
+          final_incl: r2(discountedIncl - creditApplied)
+        }
+      };
+
+      await setDoc(cartRef, emptyCartWithPricing);
 
       return ok({
-        cart: emptyCart,
+        cart: emptyCartWithPricing,
         has_rental_items: false,
         delivery_fee: { amount: deliveryFee, meta: deliveryMeta },
         warnings: { global: [], items: [] }
@@ -355,6 +423,11 @@ export async function POST(req){
        🔄 RECOMPUTE CART TOTALS
     ------------------------------------------- */
     const totals = computeCartTotals(kept, deliveryFee);
+    const adjust = computePricingAdjustments(totals.subtotal_excl, userData?.pricing);
+    const discountedExcl = r2(totals.final_excl - adjust.amountExcl);
+    const discountedIncl = r2(discountedExcl + totals.vat_total);
+    const creditAvailable = Number(userData?.credit?.availableCredit) || 0;
+    const creditApplied = useCreditFlag && creditAvailable > 0 ? creditAvailable : 0;
     const hasRentalItems = kept.some(
       (it) => it?.selected_variant_snapshot?.rental?.is_rental
     );
@@ -362,7 +435,25 @@ export async function POST(req){
     const finalCart = {
       ...cart,
       items: kept,
-      totals,
+      totals: {
+        ...totals,
+        base_final_excl: totals.final_excl,
+        base_final_incl: totals.final_incl,
+        pricing_adjustment: {
+          type: adjust.type,
+          percent: adjust.percent,
+          amount_excl: adjust.amountExcl
+        },
+        final_excl_after_discount: discountedExcl,
+        final_incl_after_discount: discountedIncl,
+        credit: {
+          available: creditAvailable,
+          applied: creditApplied,
+          final_payable_incl: r2(discountedIncl - creditApplied)
+        },
+        final_excl: discountedExcl,
+        final_incl: r2(discountedIncl - creditApplied)
+      },
       item_count: kept.reduce((a,it)=>a+(Number(it.quantity)||0),0),
       cart_corrected: warnings.items.length>0,
       warnings,

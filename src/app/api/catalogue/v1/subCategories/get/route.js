@@ -103,8 +103,25 @@ export async function GET(req){
       .slice(0, unlimited ? undefined : lim);
 
     const count = items.length;
+    let relatedSubCategories = null;
+    if (category){
+      const relSnap = await getDocs(query(col, where("grouping.category","==",category)));
+      relatedSubCategories = relSnap.docs
+        .map(d=>({ id:d.id, data:d.data()||{} }))
+        .sort((a,b)=>{
+          const apRaw = a.data?.placement?.position;
+          const bpRaw = b.data?.placement?.position;
+          const ap = Number.isFinite(+apRaw) ? +apRaw : Number.POSITIVE_INFINITY;
+          const bp = Number.isFinite(+bpRaw) ? +bpRaw : Number.POSITIVE_INFINITY;
+          return ap - bp;
+        });
+    }
 
-    if (!groupByCat) return ok({ count, items });
+    if (!groupByCat) return ok({
+      count,
+      items,
+      ...(relatedSubCategories ? { related_sub_categories: relatedSubCategories } : {})
+    });
 
     // group by grouping.category
     const map = new Map();
@@ -117,7 +134,11 @@ export async function GET(req){
       .sort(([a],[b])=>a.localeCompare(b))
       .map(([category, items])=>({ category, items }));
 
-    return ok({ count, groups });
+    return ok({
+      count,
+      groups,
+      ...(relatedSubCategories ? { related_sub_categories: relatedSubCategories } : {})
+    });
   } catch (e) {
     console.error("sub_categories/get failed:", e);
     return err(500,"Unexpected Error","Something went wrong while fetching sub-categories.", {
