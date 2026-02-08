@@ -1,6 +1,7 @@
 // app/api/catalogue/v1/products/product/get/route.js
 import { NextResponse } from "next/server";
 import { db } from "@/lib/firebase";
+import { clientDb } from "@/lib/clientFirebase";
 import { collection, doc, getDoc, getDocs } from "firebase/firestore";
 
 const ok  =(p={},s=200)=>NextResponse.json({ ok:true, ...p },{ status:s });
@@ -78,9 +79,26 @@ export async function GET(req){
     const subCategory  = normStr(searchParams.get("subCategory"));
     const brand        = normStr(searchParams.get("brand"));
     const kind         = normStr(searchParams.get("kind"));
+    const keywordsRaw  = normStr(searchParams.get("keywords"));
+    const userId       = normStr(searchParams.get("userId"));
     const isActive     = toBool(searchParams.get("isActive"));
     const isFeatured   = toBool(searchParams.get("isFeatured"));
     const groupByBrand = toBool(searchParams.get("group_by_brand")) === true;
+    const keywords = keywordsRaw
+      ? keywordsRaw.split(/[,\s]+/).map(s=>s.trim().toLowerCase()).filter(Boolean)
+      : [];
+    let favorites = [];
+    if (userId){
+      const userSnap = await getDoc(doc(clientDb, "users", userId));
+      const userData = userSnap.exists() ? userSnap.data() : null;
+      favorites = Array.isArray(userData?.preferences?.favoriteProducts)
+        ? userData.preferences.favoriteProducts.map(v=>String(v).trim()).filter(Boolean)
+        : [];
+      if (favorites.length === 0){
+        if (groupByBrand) return ok({ total: 0, count: 0, groups: [] });
+        return ok({ total: 0, count: 0, items: [] });
+      }
+    }
 
     // limit handling: default 24; support 'all'
     const rawLimitNorm = normStr(searchParams.get("limit"));
@@ -100,9 +118,30 @@ export async function GET(req){
     items = items.filter(({ data })=>{
       if (!matchesGrouping(data, { category, subCategory, brand })) return false;
       if (kind        && data?.grouping?.kind !== kind) return false;
+      if (keywords.length > 0){
+        const list = Array.isArray(data?.product?.keywords) ? data.product.keywords : [];
+        const lower = list.map(k=>String(k).toLowerCase());
+        if (!keywords.some(k=>lower.includes(k))) return false;
+      }
+      if (favorites.length > 0){
+        const uid = String(data?.product?.unique_id ?? "");
+        if (!favorites.includes(uid)) return false;
+      }
       if (isActive    !== null && !!data?.placement?.isActive   !== isActive)   return false;
       if (isFeatured  !== null && !!data?.placement?.isFeatured !== isFeatured) return false;
       return true;
+    });
+
+    items = items.map(({ id, data })=>{
+      const vars = Array.isArray(data?.variants) ? data.variants : [];
+      const hasSaleVariant = vars.some(v => v?.sale?.is_on_sale === true);
+      return {
+        id,
+        data: {
+          ...data,
+          has_sale_variant: hasSaleVariant
+        }
+      };
     });
 
     // 4) Sort by placement.position asc (missing -> 0)
