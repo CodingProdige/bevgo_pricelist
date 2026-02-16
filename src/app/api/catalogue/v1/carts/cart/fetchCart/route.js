@@ -86,20 +86,45 @@ function computeCartTotals(items, deliveryFee = 0){
     deposit_total_excl: r2(deposit),
     delivery_fee_excl: r2(delivery),
     sale_savings_excl: r2(savings),
-    vat_total,
+    vat_total: r2(vat_total),
     final_excl,
     final_incl
   };
 }
 
+const REBATE_TIERS = [
+  { min: 0,     percent: 1 },
+  { min: 3000,  percent: 2 },
+  { min: 10000, percent: 3 },
+  { min: 30000, percent: 4 },
+  { min: 60000, percent: 5 }
+];
+
 function resolveVolumeRebatePercent(subtotalExcl){
   const total = Number(subtotalExcl) || 0;
-  if (total >= 200000) return 8;
-  if (total >= 100000) return 5;
-  if (total >= 50000) return 3;
-  if (total >= 25000) return 2;
-  if (total >= 10000) return 1;
-  return 0;
+  let pct = 0;
+  for (const t of REBATE_TIERS){
+    if (total >= t.min) pct = t.percent;
+  }
+  return pct;
+}
+
+function nextRebateTierInfo(subtotalExcl){
+  const total = Number(subtotalExcl) || 0;
+  for (const t of REBATE_TIERS){
+    if (total < t.min){
+      return {
+        next_tier_min_excl: r2(t.min),
+        next_tier_percent: t.percent,
+        remaining_to_next_tier_excl: r2(t.min - total)
+      };
+    }
+  }
+  return {
+    next_tier_min_excl: null,
+    next_tier_percent: null,
+    remaining_to_next_tier_excl: r2(0)
+  };
 }
 
 function computePricingAdjustments(subtotalExcl, pricing){
@@ -207,7 +232,7 @@ async function fetchDeliveryFee(address, userId){
         return { amount: 0, meta: json };
       }
 
-      const amount = Number(json?.fee?.amount || 0);
+      const amount = r2(Number(json?.fee?.amount || 0));
       return { amount, meta: json };
     }
 
@@ -279,10 +304,20 @@ export async function POST(req){
 
       const emptyTotals = computeCartTotals([], deliveryFee);
       const adjust = computePricingAdjustments(emptyTotals.subtotal_excl, userData?.pricing);
-      const discountedExcl = r2(emptyTotals.final_excl - adjust.amountExcl);
+      const rebateNextTier = (
+        adjust.type === "rebate" && !userData?.pricing?.rebate?.tierLocked
+      ) ? nextRebateTierInfo(emptyTotals.subtotal_excl) : {
+        next_tier_min_excl: null,
+        next_tier_percent: null,
+        remaining_to_next_tier_excl: r2(0)
+      };
+      const discountedProductsExcl = r2(emptyTotals.subtotal_excl - adjust.amountExcl);
+      const discountedExcl = r2(
+        discountedProductsExcl + emptyTotals.deposit_total_excl + emptyTotals.delivery_fee_excl
+      );
       const discountedIncl = r2(discountedExcl + emptyTotals.vat_total);
-      const creditAvailable = Number(userData?.credit?.availableCredit) || 0;
-      const creditApplied = useCreditFlag && creditAvailable > 0 ? creditAvailable : 0;
+      const creditAvailable = r2(Number(userData?.credit?.availableCredit) || 0);
+      const creditApplied = useCreditFlag && creditAvailable > 0 ? r2(creditAvailable) : 0;
 
       const emptyCartWithPricing = {
         ...emptyCart,
@@ -293,8 +328,13 @@ export async function POST(req){
           pricing_adjustment: {
             type: adjust.type,
             percent: adjust.percent,
-            amount_excl: adjust.amountExcl
+            amount_excl: adjust.amountExcl,
+            tier_locked: Boolean(userData?.pricing?.rebate?.tierLocked),
+            next_tier_min_excl: rebateNextTier.next_tier_min_excl,
+            next_tier_percent: rebateNextTier.next_tier_percent,
+            remaining_to_next_tier_excl: rebateNextTier.remaining_to_next_tier_excl
           },
+          pricing_savings_excl: adjust.amountExcl,
           final_excl_after_discount: discountedExcl,
           final_incl_after_discount: discountedIncl,
           credit: {
@@ -312,7 +352,7 @@ export async function POST(req){
       return ok({
         cart: emptyCartWithPricing,
         has_rental_items: false,
-        delivery_fee: { amount: deliveryFee, meta: deliveryMeta },
+        delivery_fee: { amount: r2(deliveryFee), meta: deliveryMeta },
         warnings: { global: [], items: [] }
       });
     }
@@ -424,10 +464,20 @@ export async function POST(req){
     ------------------------------------------- */
     const totals = computeCartTotals(kept, deliveryFee);
     const adjust = computePricingAdjustments(totals.subtotal_excl, userData?.pricing);
-    const discountedExcl = r2(totals.final_excl - adjust.amountExcl);
+    const rebateNextTier = (
+      adjust.type === "rebate" && !userData?.pricing?.rebate?.tierLocked
+    ) ? nextRebateTierInfo(totals.subtotal_excl) : {
+      next_tier_min_excl: null,
+      next_tier_percent: null,
+      remaining_to_next_tier_excl: r2(0)
+    };
+    const discountedProductsExcl = r2(totals.subtotal_excl - adjust.amountExcl);
+    const discountedExcl = r2(
+      discountedProductsExcl + totals.deposit_total_excl + totals.delivery_fee_excl
+    );
     const discountedIncl = r2(discountedExcl + totals.vat_total);
-    const creditAvailable = Number(userData?.credit?.availableCredit) || 0;
-    const creditApplied = useCreditFlag && creditAvailable > 0 ? creditAvailable : 0;
+    const creditAvailable = r2(Number(userData?.credit?.availableCredit) || 0);
+    const creditApplied = useCreditFlag && creditAvailable > 0 ? r2(creditAvailable) : 0;
     const hasRentalItems = kept.some(
       (it) => it?.selected_variant_snapshot?.rental?.is_rental
     );
@@ -442,8 +492,13 @@ export async function POST(req){
         pricing_adjustment: {
           type: adjust.type,
           percent: adjust.percent,
-          amount_excl: adjust.amountExcl
+          amount_excl: adjust.amountExcl,
+          tier_locked: Boolean(userData?.pricing?.rebate?.tierLocked),
+          next_tier_min_excl: rebateNextTier.next_tier_min_excl,
+          next_tier_percent: rebateNextTier.next_tier_percent,
+          remaining_to_next_tier_excl: rebateNextTier.remaining_to_next_tier_excl
         },
+        pricing_savings_excl: adjust.amountExcl,
         final_excl_after_discount: discountedExcl,
         final_incl_after_discount: discountedIncl,
         credit: {
@@ -468,7 +523,7 @@ export async function POST(req){
     return ok({
       cart: finalCart,
       has_rental_items: hasRentalItems,
-      delivery_fee: { amount: deliveryFee, meta: deliveryMeta },
+      delivery_fee: { amount: r2(deliveryFee), meta: deliveryMeta },
       warnings
     });
 

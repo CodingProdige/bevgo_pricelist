@@ -24,7 +24,7 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/firebase";
 import {
-  collection, doc, getDoc, getDocs
+  collection, doc, getDoc, getDocs, query, where
 } from "firebase/firestore";
 
 const ok  =(p={},s=200)=>NextResponse.json({ ok:true, ...p },{ status:s });
@@ -138,8 +138,13 @@ export async function GET(req){
       lim = (Number.isFinite(n) && n>0) ? n : 24;
     }
 
-    // 1) load whole collection (no indexes/orderBy)
-    const snapAll = await getDocs(collection(db,"brands"));
+    // 1) load with safe query constraints (preserve inclusive matcher)
+    const col = collection(db,"brands");
+    const filters = [];
+    if (category) filters.push(where("grouping.category","==",category));
+    if (isActive !== null)   filters.push(where("placement.isActive","==",isActive));
+    if (isFeatured !== null) filters.push(where("placement.isFeatured","==",isFeatured));
+    const snapAll = await getDocs(filters.length ? query(col, ...filters) : col);
     let items = snapAll.docs.map(d=>({ id:d.id, data:d.data()||{} }));
 
     // 2) in-memory filters with inclusive matcher

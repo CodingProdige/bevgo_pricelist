@@ -39,7 +39,10 @@ export async function GET(req){
     }
 
     const col = collection(db,"categories");
-    const rs  = await getDocs(col);
+    const filters = [];
+    if (isActive !== null)   filters.push(where("placement.isActive","==",isActive));
+    if (isFeatured !== null) filters.push(where("placement.isFeatured","==",isFeatured));
+    const rs  = await getDocs(filters.length ? query(col, ...filters) : col);
 
     let items = rs.docs.map(d=>({ id:d.id, data:d.data()||{} }));
     items = items.filter(({ data })=>{

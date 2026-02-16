@@ -8,6 +8,16 @@ const ok = (p = {}, s = 200) => NextResponse.json({ ok: true, data: p }, { statu
 const err = (s, t, m, e = {}) => NextResponse.json({ ok: false, title: t, message: m, ...e }, { status: s });
 
 const now = () => new Date().toISOString();
+const normalizeInventoryReservations = (entries) => {
+  const map = new Map();
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    const location_id = String(entry?.location_id || "").trim();
+    const qty = Math.max(0, Number(entry?.qty) || 0);
+    if (!location_id || qty <= 0) continue;
+    map.set(location_id, (map.get(location_id) || 0) + qty);
+  }
+  return [...map.entries()].map(([location_id, qty]) => ({ location_id, qty }));
+};
 
 export async function POST(req) {
   try {
@@ -121,6 +131,28 @@ export async function POST(req) {
         if (vSnap.rental?.is_rental && vSnap.rental?.limited_stock && pv.rental?.is_rental && pv.rental?.limited_stock) {
           const startRent = Math.max(0, Number(pv.rental.qty_available) || 0);
           pv.rental.qty_available = startRent + qty;
+        }
+
+        // Restore regular inventory stock for non-sale/non-rental lines.
+        if (!vSnap.sale?.is_on_sale && !vSnap.rental?.is_rental && Array.isArray(pv.inventory) && pv.inventory.length) {
+          const inv = pv.inventory.map((row) => ({ ...row }));
+
+          const reservations = normalizeInventoryReservations(it?.inventory_reservations);
+          if (reservations.length) {
+            for (const rel of reservations) {
+              const idx = inv.findIndex((row) => String(row?.location_id || "") === String(rel.location_id || ""));
+              const targetIdx = idx >= 0 ? idx : 0;
+              const start = Math.max(0, Number(inv[targetIdx]?.in_stock_qty) || 0);
+              inv[targetIdx].in_stock_qty = start + rel.qty;
+            }
+          } else {
+            const idx = inv.findIndex(() => true);
+            if (idx >= 0) {
+              const start = Math.max(0, Number(inv[idx]?.in_stock_qty) || 0);
+              inv[idx].in_stock_qty = start + qty;
+            }
+          }
+          pv.inventory = inv;
         }
 
         variantsArr[vidx] = pv;

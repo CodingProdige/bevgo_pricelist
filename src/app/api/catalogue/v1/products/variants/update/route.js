@@ -114,6 +114,10 @@ function sanitizePatch(patch) {
       out.placement.is_loyalty_eligible = toBool(
         src.is_loyalty_eligible
       );
+    if ("continue_selling_out_of_stock" in src)
+      out.placement.continue_selling_out_of_stock = toBool(
+        src.continue_selling_out_of_stock
+      );
   }
 
   if ("pricing" in patch) {

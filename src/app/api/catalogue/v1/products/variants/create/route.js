@@ -87,6 +87,10 @@ export async function POST(req){
         isFeatured:toBool(data?.placement?.isFeatured,false),
         is_default:toBool(data?.placement?.is_default,variants.length===0),
         is_loyalty_eligible:toBool(data?.placement?.is_loyalty_eligible,true),
+        continue_selling_out_of_stock:toBool(
+          data?.placement?.continue_selling_out_of_stock,
+          false
+        ),
       },
 
       pricing:{

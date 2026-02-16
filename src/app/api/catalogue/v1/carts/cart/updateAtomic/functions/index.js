@@ -13,6 +13,94 @@ function clone(obj) {
   return obj ? JSON.parse(JSON.stringify(obj)) : obj;
 }
 
+function normalizeInventoryReservations(entries) {
+  const map = new Map();
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    const location_id = String(entry?.location_id || "").trim();
+    const qty = Math.max(0, Number(entry?.qty) || 0);
+    if (!location_id || qty <= 0) continue;
+    map.set(location_id, (map.get(location_id) || 0) + qty);
+  }
+  return [...map.entries()].map(([location_id, qty]) => ({ location_id, qty }));
+}
+
+function mergeInventoryReservations(...lists) {
+  return normalizeInventoryReservations(lists.flatMap((l) => (Array.isArray(l) ? l : [])));
+}
+
+function releaseFromReservations(reservations, releaseQty) {
+  let remaining = Math.max(0, Number(releaseQty) || 0);
+  const released = [];
+  const kept = [];
+
+  for (const row of normalizeInventoryReservations(reservations)) {
+    if (remaining <= 0) {
+      kept.push(row);
+      continue;
+    }
+    const take = Math.min(row.qty, remaining);
+    if (take > 0) released.push({ location_id: row.location_id, qty: take });
+    const left = row.qty - take;
+    if (left > 0) kept.push({ location_id: row.location_id, qty: left });
+    remaining -= take;
+  }
+
+  return { released, remaining: kept, unresolved: remaining };
+}
+
+function applyInventoryDelta(variant, { deltaInventory = 0, reservations = [] } = {}) {
+  const delta = Number(deltaInventory) || 0;
+  const rows = Array.isArray(variant?.inventory)
+    ? variant.inventory.map((row) => ({ ...row }))
+    : [];
+  const normalizedReservations = normalizeInventoryReservations(reservations);
+  const result = {
+    consumed: [],
+    remainingReservations: normalizedReservations
+  };
+
+  if (!delta || !rows.length) return result;
+
+  if (delta > 0) {
+    // Consume inventory from rows in order until requested delta is exhausted.
+    let remaining = delta;
+    for (const row of rows) {
+      if (remaining <= 0) break;
+      const start = Math.max(0, Number(row?.in_stock_qty) || 0);
+      const take = Math.min(start, remaining);
+      row.in_stock_qty = start - take;
+      remaining -= take;
+      if (take > 0) {
+        result.consumed.push({ location_id: String(row?.location_id || ""), qty: take });
+      }
+    }
+    result.remainingReservations = mergeInventoryReservations(normalizedReservations, result.consumed);
+  } else {
+    const releaseQty = Math.abs(delta);
+    const { released, remaining, unresolved } = releaseFromReservations(normalizedReservations, releaseQty);
+
+    for (const rel of released) {
+      const idx = rows.findIndex((row) => String(row?.location_id || "") === String(rel.location_id || ""));
+      const targetIdx = idx >= 0 ? idx : 0;
+      const start = Math.max(0, Number(rows[targetIdx]?.in_stock_qty) || 0);
+      rows[targetIdx].in_stock_qty = start + rel.qty;
+    }
+
+    if (unresolved > 0) {
+      const idx = rows.findIndex(() => true);
+      if (idx >= 0) {
+        const start = Math.max(0, Number(rows[idx]?.in_stock_qty) || 0);
+        rows[idx].in_stock_qty = start + unresolved;
+      }
+    }
+
+    result.remainingReservations = remaining;
+  }
+
+  variant.inventory = rows;
+  return result;
+}
+
 const makeCartItemKey = (productId, variantId) =>
   `cki_${String(productId || "p").slice(-4)}_${String(variantId || "v").slice(-4)}_${Date.now()
     .toString(36)}${Math.random().toString(36).slice(2, 6)}`;
@@ -95,6 +183,7 @@ export async function updateCartAtomic(tx, body) {
   const existingIndex = items.findIndex((it) => String(it?.cart_item_key || "") === String(cartItemKey));
   const existingItem = existingIndex >= 0 ? items[existingIndex] : null;
   const currentQty = Number(existingItem?.quantity) || 0;
+  const existingInventoryReservations = normalizeInventoryReservations(existingItem?.inventory_reservations);
 
   if (requireKey && !existingItem && mode !== "remove") {
     throw { code: 404, title: "Item Not Found", message: "Cart item not found for provided key." };
@@ -147,7 +236,7 @@ export async function updateCartAtomic(tx, body) {
     throw { code: 400, title: "Missing Input", message: "productId and variantId are required for add." };
   }
 
-  const shouldLoadProduct = mode !== "remove";
+  const shouldLoadProduct = mode !== "remove" || Boolean(existingItem);
   let productRef = null;
   if (shouldLoadProduct) {
     if (!resolvedProductId || !resolvedVariantId) {
@@ -219,9 +308,32 @@ export async function updateCartAtomic(tx, body) {
     (variantSnapshot?.sale?.is_on_sale && Number(variantSnapshot?.sale?.qty_available) <= 0);
 
   const { quantity: finalQty, capped, available, reason } = capQuantity(variantSnapshot, desiredQty, {
+    currentQty,
     ignoreSale,
     supplierOOS
   });
+  const attemptedIncrease = Math.max(0, desiredQty - currentQty);
+  const actualIncrease = Math.max(0, finalQty - currentQty);
+  if (attemptedIncrease > 0 && actualIncrease <= 0) {
+    const ui = buildUiMessage({
+      type: "error",
+      title: "Out of Stock",
+      message:
+        reason === "supplier_out_of_stock"
+          ? "Supplier is out of stock; cannot increase quantity."
+          : "Requested item is no longer available.",
+      detail: available != null ? `Available: ${available}` : null
+    });
+    throw {
+      code: 409,
+      title: "Out of Stock",
+      message:
+        reason === "supplier_out_of_stock"
+          ? "Supplier is out of stock; cannot increase quantity."
+          : "Requested item is no longer available.",
+      ui
+    };
+  }
 
   let _ui = null;
   if (capped) {
@@ -265,20 +377,14 @@ export async function updateCartAtomic(tx, body) {
 
   const saleActiveLive = Boolean(variantSnapshot?.sale?.is_on_sale && !variantSnapshot?.sale?.disabled_by_admin);
   const saleQtyLive = Math.max(0, Number(variantSnapshot?.sale?.qty_available) || 0);
-  const wasSaleInCart = Boolean(existingItem?.selected_variant_snapshot?.sale?.is_on_sale);
 
-  const increaseAmount =
-    mode === "increment" || mode === "add"
-      ? Math.max(0, Number(qtyInput) || 0)
-      : mode === "set"
-        ? Math.max(0, desiredQty - currentQty)
-        : 0;
+  const increaseAmount = Math.max(0, finalQty - currentQty);
 
   let salePortion = 0;
   if (increaseAmount > 0 && saleActiveLive) {
     salePortion = Math.min(increaseAmount, saleQtyLive);
   }
-  const regularQtyToAdd = increaseAmount > salePortion ? increaseAmount - salePortion : 0;
+  const regularQtyToAdd = Math.max(0, increaseAmount - salePortion);
 
   let nextExistingQty = finalQty;
   if (increaseAmount > 0) {
@@ -298,7 +404,19 @@ export async function updateCartAtomic(tx, body) {
   } else if (delta < 0 && isSaleLine) {
     deltaSale = delta;
   }
+
+  let deltaInventory = 0;
+  if (increaseAmount > 0) {
+    deltaInventory = regularQtyToAdd;
+  } else if (delta < 0 && !isSaleLine && !isRentalLine) {
+    deltaInventory = delta;
+  }
+
   const deltaRental = isRentalLine ? delta : 0;
+  let inventoryMutationResult = {
+    consumed: [],
+    remainingReservations: existingInventoryReservations
+  };
 
   const adjustedVariantSnapshot = (() => {
     const v = clone(variantSnapshot);
@@ -353,6 +471,13 @@ export async function updateCartAtomic(tx, body) {
         pv.rental.qty_available = nextRent;
       }
 
+      if (!pv.rental?.is_rental) {
+        inventoryMutationResult = applyInventoryDelta(pv, {
+          deltaInventory,
+          reservations: existingInventoryReservations
+        });
+      }
+
       variantsArr[vIdx] = pv;
       updatedVariant = pv;
       updatedProduct.variants = variantsArr;
@@ -376,6 +501,12 @@ export async function updateCartAtomic(tx, body) {
       selected_variant_snapshot: safeVariantSnapshot,
       line_totals: computeLineTotals(safeVariantSnapshot, nextExistingQty)
     };
+    if (!safeVariantSnapshot?.sale?.is_on_sale && !safeVariantSnapshot?.rental?.is_rental) {
+      line.inventory_reservations =
+        deltaInventory < 0
+          ? inventoryMutationResult.remainingReservations
+          : existingInventoryReservations;
+    }
 
     if (existingIndex >= 0) {
       items[existingIndex] = line;
@@ -404,7 +535,11 @@ export async function updateCartAtomic(tx, body) {
         ...line,
         quantity: nextQty,
         selected_variant_snapshot: regularVariant,
-        line_totals: computeLineTotals(regularVariant, nextQty)
+        line_totals: computeLineTotals(regularVariant, nextQty),
+        inventory_reservations: mergeInventoryReservations(
+          line?.inventory_reservations,
+          inventoryMutationResult.consumed
+        )
       };
       items[existingRegularIdx] = mergedLine;
     } else {
@@ -414,7 +549,8 @@ export async function updateCartAtomic(tx, body) {
         cart_item_key: newKey,
         product_snapshot: clone(productSnapshot),
         selected_variant_snapshot: regularVariant,
-        line_totals: computeLineTotals(regularVariant, regularQtyToAdd)
+        line_totals: computeLineTotals(regularVariant, regularQtyToAdd),
+        inventory_reservations: normalizeInventoryReservations(inventoryMutationResult.consumed)
       };
       items.push(newLine);
       if (!generatedKey) generatedKey = newKey;
