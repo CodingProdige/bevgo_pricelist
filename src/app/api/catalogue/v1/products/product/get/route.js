@@ -124,6 +124,86 @@ function variantMatchesPack(v, { packUnitCount, packUnitVolume, packUnit }){
   return true;
 }
 
+function variantInventoryHasStock(variant){
+  const rows = Array.isArray(variant?.inventory) ? variant.inventory : [];
+  if (!rows.length) return false;
+
+  return rows.some((row) => {
+    if (!row || typeof row !== "object") return false;
+    if (row?.in_stock === false) return false;
+    if (row?.supplier_out_of_stock === true) return false;
+
+    const qty = Number(
+      row?.in_stock_qty ??
+      row?.unit_stock_qty ??
+      row?.qty_available ??
+      row?.quantity ??
+      row?.qty ??
+      0
+    );
+    return Number.isFinite(qty) && qty > 0;
+  });
+}
+
+function hasInStockVariants(data){
+  const variants = Array.isArray(data?.variants) ? data.variants : [];
+  return variants.some((variant) => {
+    if (variantTotalInStockItemsAvailable(variant) > 0) return true;
+    return variantRentalIsAvailable(variant);
+  });
+}
+
+function variantInventoryQtyTotal(variant){
+  const rows = Array.isArray(variant?.inventory) ? variant.inventory : [];
+  if (!rows.length) return 0;
+
+  return rows.reduce((sum, row) => {
+    if (!row || typeof row !== "object") return sum;
+    if (row?.in_stock === false) return sum;
+    if (row?.supplier_out_of_stock === true) return sum;
+
+    const qty = Number(
+      row?.in_stock_qty ??
+      row?.unit_stock_qty ??
+      row?.qty_available ??
+      row?.quantity ??
+      row?.qty ??
+      0
+    );
+    return Number.isFinite(qty) && qty > 0 ? sum + qty : sum;
+  }, 0);
+}
+
+function variantSaleQtyAvailable(variant){
+  const isSaleEnabled = variant?.sale?.is_on_sale === true && variant?.sale?.disabled_by_admin !== true;
+  if (!isSaleEnabled) return 0;
+  const qty = Number(variant?.sale?.qty_available ?? 0);
+  return Number.isFinite(qty) && qty > 0 ? qty : 0;
+}
+
+function variantTotalInStockItemsAvailable(variant){
+  if (variant?.rental?.is_rental === true) return 0;
+  return variantInventoryQtyTotal(variant) + variantSaleQtyAvailable(variant);
+}
+
+function variantRentalIsAvailable(variant){
+  if (variant?.rental?.is_rental !== true) return false;
+
+  const limitedStock = variant?.rental?.limited_stock === true;
+  if (!limitedStock) return true;
+
+  const qty = Number(variant?.rental?.qty_available ?? 0);
+  return Number.isFinite(qty) && qty > 0;
+}
+
+function enrichVariantsWithAvailability(variants){
+  const list = Array.isArray(variants) ? variants : [];
+  return list.map((variant) => ({
+    ...variant,
+    total_in_stock_items_available: variantTotalInStockItemsAvailable(variant)
+  }));
+}
+
 function productInStock(data){
   const placement = data?.placement || {};
   if (placement?.in_stock === false) return false;
@@ -159,6 +239,10 @@ export async function GET(req){
       const snap = await getDoc(ref);
       if (!snap.exists()) return err(404,"Not Found",`No product with id '${byId}'.`);
       const data = normalizeTimestamps(snap.data()||{});
+      const dataWithVariantAvailability = {
+        ...data,
+        variants: enrichVariantsWithAvailability(data?.variants)
+      };
       const userId = normStr(searchParams.get("userId"));
       let isFavorite = false;
       if (userId){
@@ -167,10 +251,17 @@ export async function GET(req){
         const favorites = Array.isArray(userData?.preferences?.favoriteProducts)
           ? userData.preferences.favoriteProducts.map(v=>String(v).trim()).filter(Boolean)
           : [];
-        const uid = String(data?.product?.unique_id ?? "");
+        const uid = String(dataWithVariantAvailability?.product?.unique_id ?? "");
         isFavorite = favorites.length > 0 && uid ? favorites.includes(uid) : false;
       }
-      return ok({ id: snap.id, data: { ...data, is_favorite: isFavorite } });
+      return ok({
+        id: snap.id,
+        data: {
+          ...dataWithVariantAvailability,
+          is_favorite: isFavorite,
+          has_in_stock_variants: hasInStockVariants(dataWithVariantAvailability)
+        }
+      });
     }
 
     // --- List mode (ALL in memory, then filter/sort/limit) ---
@@ -302,16 +393,22 @@ export async function GET(req){
     });
 
     items = items.map(({ id, data })=>{
+      const enrichedVariants = enrichVariantsWithAvailability(data?.variants);
+      const dataWithVariantAvailability = {
+        ...data,
+        variants: enrichedVariants
+      };
       const vars = Array.isArray(data?.variants) ? data.variants : [];
       const hasSaleVariant = vars.some(v => v?.sale?.is_on_sale === true);
-      const uid = String(data?.product?.unique_id ?? "");
+      const uid = String(dataWithVariantAvailability?.product?.unique_id ?? "");
       const isFavorite = favorites.length > 0 && uid ? favorites.includes(uid) : false;
       return {
         id,
         data: {
-          ...data,
+          ...dataWithVariantAvailability,
           has_sale_variant: hasSaleVariant,
-          is_favorite: isFavorite
+          is_favorite: isFavorite,
+          has_in_stock_variants: hasInStockVariants(dataWithVariantAvailability)
         }
       };
     });
