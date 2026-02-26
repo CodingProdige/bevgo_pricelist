@@ -10,6 +10,7 @@ export function capQuantity(variant, desiredQty, { currentQty = 0, ignoreSale = 
   const current = Math.max(0, Number(currentQty) || 0);
   const requestedIncrease = Math.max(0, requested - current);
   const continueSellingOOS = Boolean(variant?.placement?.continue_selling_out_of_stock);
+  const limitedRental = Boolean(variant?.rental?.is_rental && variant?.rental?.limited_stock);
 
   let available = null;
   let reason = null;
@@ -22,7 +23,13 @@ export function capQuantity(variant, desiredQty, { currentQty = 0, ignoreSale = 
     return { quantity: current, capped: requested !== current, available: current, reason: "supplier_out_of_stock" };
   }
 
-  if (variant?.rental?.is_rental && variant?.rental?.limited_stock) {
+  // When enabled, allow overselling even if inventory/sale availability is zero.
+  // Keep limited rental stock rules intact.
+  if (continueSellingOOS && !limitedRental) {
+    return { quantity: requested, capped: false, available: null, reason: null };
+  }
+
+  if (limitedRental) {
     available = Math.max(0, toNum(variant?.rental?.qty_available));
     reason = "rental stock";
   } else if (saleActive) {

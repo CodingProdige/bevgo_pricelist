@@ -196,6 +196,21 @@ function variantRentalIsAvailable(variant){
   return Number.isFinite(qty) && qty > 0;
 }
 
+function variantCanContinueSellingOutOfStock(variant){
+  return variant?.placement?.continue_selling_out_of_stock === true;
+}
+
+function productHasListableAvailability(data){
+  const variants = Array.isArray(data?.variants) ? data.variants : [];
+  if (!variants.length) return false;
+
+  return variants.some((variant) =>
+    variantTotalInStockItemsAvailable(variant) > 0 ||
+    variantRentalIsAvailable(variant) ||
+    variantCanContinueSellingOutOfStock(variant)
+  );
+}
+
 function enrichVariantsWithAvailability(variants){
   const list = Array.isArray(variants) ? variants : [];
   return list.map((variant) => ({
@@ -230,6 +245,7 @@ function productInStock(data){
 export async function GET(req){
   try{
     const { searchParams } = new URL(req.url);
+    const includeUnavailable = toBool(searchParams.get("includeUnavailable")) === true;
 
     // --- Single by id (docId == unique_id) ---
     const byId = normStr(searchParams.get("id"));
@@ -243,6 +259,9 @@ export async function GET(req){
         ...data,
         variants: enrichVariantsWithAvailability(data?.variants)
       };
+      if (!includeUnavailable && !productHasListableAvailability(dataWithVariantAvailability)) {
+        return err(404, "Not Found", "Product is unavailable.");
+      }
       const userId = normStr(searchParams.get("userId"));
       let isFavorite = false;
       if (userId){
@@ -259,7 +278,10 @@ export async function GET(req){
         data: {
           ...dataWithVariantAvailability,
           is_favorite: isFavorite,
-          has_in_stock_variants: hasInStockVariants(dataWithVariantAvailability)
+          has_in_stock_variants: hasInStockVariants(dataWithVariantAvailability),
+          has_returnable_variants: (Array.isArray(dataWithVariantAvailability?.variants) ? dataWithVariantAvailability.variants : []).some(variantHasReturnable),
+          is_eligible_by_variant_availability: productHasListableAvailability(dataWithVariantAvailability),
+          is_unavailable_for_listing: !productHasListableAvailability(dataWithVariantAvailability)
         }
       });
     }
@@ -340,6 +362,7 @@ export async function GET(req){
 
     // 3) In-memory filters (inclusive grouping logic + others)
     items = items.filter(({ data })=>{
+      if (!includeUnavailable && !productHasListableAvailability(data)) return false;
       if (!matchesGrouping(data, { category, subCategory, brand })) return false;
       if (kind        && data?.grouping?.kind !== kind) return false;
       if (keywords.length > 0){
@@ -398,17 +421,21 @@ export async function GET(req){
         ...data,
         variants: enrichedVariants
       };
-      const vars = Array.isArray(data?.variants) ? data.variants : [];
+      const vars = Array.isArray(dataWithVariantAvailability?.variants) ? dataWithVariantAvailability.variants : [];
       const hasSaleVariant = vars.some(v => v?.sale?.is_on_sale === true);
       const uid = String(dataWithVariantAvailability?.product?.unique_id ?? "");
       const isFavorite = favorites.length > 0 && uid ? favorites.includes(uid) : false;
+      const isEligibleByVariantAvailability = productHasListableAvailability(dataWithVariantAvailability);
       return {
         id,
         data: {
           ...dataWithVariantAvailability,
           has_sale_variant: hasSaleVariant,
           is_favorite: isFavorite,
-          has_in_stock_variants: hasInStockVariants(dataWithVariantAvailability)
+          has_in_stock_variants: hasInStockVariants(dataWithVariantAvailability),
+          has_returnable_variants: vars.some(variantHasReturnable),
+          is_eligible_by_variant_availability: isEligibleByVariantAvailability,
+          is_unavailable_for_listing: !isEligibleByVariantAvailability
         }
       };
     });
