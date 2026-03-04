@@ -260,16 +260,18 @@ async function fetchDeliveryFee(address, userId){
 
 export async function POST(req){
   try {
-    const { customerId, deliveryAddress, useCredit } = await req.json();
+    const { customerId, deliveryAddress, useCredit, onBehalfOfUid } = await req.json();
     if (!customerId)
       return err(400,"Invalid Request","customerId is required.");
+
+    const pricingProfileUid = String(onBehalfOfUid || customerId).trim();
 
     const { amount: deliveryFee, meta: deliveryMeta } = await fetchDeliveryFee(
       deliveryAddress,
       customerId
     );
 
-    const userRef = doc(clientDb, "users", customerId);
+    const userRef = doc(clientDb, "users", pricingProfileUid);
     const userSnap = await getDoc(userRef);
     const userData = userSnap.exists() ? userSnap.data() : null;
     const useCreditFlag = useCredit === true || useCredit === "true";
@@ -352,6 +354,7 @@ export async function POST(req){
       return ok({
         cart: emptyCartWithPricing,
         has_rental_items: false,
+        pricing_profile_uid: pricingProfileUid,
         delivery_fee: { amount: r2(deliveryFee), meta: deliveryMeta },
         warnings: { global: [], items: [] }
       });
@@ -523,6 +526,7 @@ export async function POST(req){
     return ok({
       cart: finalCart,
       has_rental_items: hasRentalItems,
+      pricing_profile_uid: pricingProfileUid,
       delivery_fee: { amount: r2(deliveryFee), meta: deliveryMeta },
       warnings
     });
