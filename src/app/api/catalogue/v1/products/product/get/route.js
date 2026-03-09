@@ -259,9 +259,6 @@ export async function GET(req){
         ...data,
         variants: enrichVariantsWithAvailability(data?.variants)
       };
-      if (!includeUnavailable && !productHasListableAvailability(dataWithVariantAvailability)) {
-        return err(404, "Not Found", "Product is unavailable.");
-      }
       const userId = normStr(searchParams.get("userId"));
       let isFavorite = false;
       if (userId){
@@ -424,7 +421,7 @@ export async function GET(req){
       const vars = Array.isArray(dataWithVariantAvailability?.variants) ? dataWithVariantAvailability.variants : [];
       const hasSaleVariant = vars.some(v => v?.sale?.is_on_sale === true);
       const uid = String(dataWithVariantAvailability?.product?.unique_id ?? "");
-      const isFavorite = favorites.length > 0 && uid ? favorites.includes(uid) : false;
+      const isFavorite = userId ? (favorites.length > 0 && uid ? favorites.includes(uid) : false) : false;
       const isEligibleByVariantAvailability = productHasListableAvailability(dataWithVariantAvailability);
       return {
         id,

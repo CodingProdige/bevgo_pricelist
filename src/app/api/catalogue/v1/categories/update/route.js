@@ -1,13 +1,19 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/firebase";
 import {
-  collection, doc, getDoc, getDocs, updateDoc, setDoc, deleteDoc, serverTimestamp
+  collection, doc, getDoc, getDocs, updateDoc, setDoc, deleteDoc, serverTimestamp, writeBatch
 } from "firebase/firestore";
 
 const ok  =(p={},s=200)=>NextResponse.json({ ok:true, ...p },{ status:s });
 const err =(s,t,m,e={})=>NextResponse.json({ ok:false, title:t, message:m, ...e },{ status:s });
 
 const titleKey = (s)=>String(s??"").toLowerCase().replace(/\s+/g," ").trim();
+const toBool = (v, f = false) =>
+  typeof v === "boolean" ? v :
+  typeof v === "number" ? v !== 0 :
+  typeof v === "string" ? ["true","1","yes","y"].includes(v.toLowerCase()) :
+  f;
+const chunk = (arr,n)=>{ const out=[]; for(let i=0;i<arr.length;i+=n) out.push(arr.slice(i,i+n)); return out; };
 
 async function titleExists(normalizedTitle, excludeId){
   if (!normalizedTitle) return false;
@@ -122,6 +128,10 @@ export async function POST(req){
     const oldSlug = String(current?.category?.slug ?? "").trim();
     const newSlug = String(next?.category?.slug ?? oldSlug).trim();
     const slugChanged = !!(oldSlug && newSlug && oldSlug !== newSlug);
+    const isActiveTouched =
+      data?.placement &&
+      Object.prototype.hasOwnProperty.call(data.placement, "isActive");
+    const nextIsActive = toBool(next?.placement?.isActive, true);
 
     // Save category first
     await setDoc(currRef, next, { merge:false });
@@ -151,13 +161,42 @@ export async function POST(req){
       }
     }
 
+    // Cascade category isActive to linked sub-categories + brands (products are intentionally independent)
+    let activePropagation = null;
+    if (isActiveTouched) {
+      const targetCategorySlug = newSlug || oldSlug;
+      activePropagation = { isActive: nextIsActive, sub_categories: 0, brands: 0 };
+
+      if (targetCategorySlug) {
+        for (const col of ["sub_categories", "brands"]) {
+          const rs = await getDocs(collection(db, col));
+          const matches = rs.docs.filter(
+            (d) => String(d.data()?.grouping?.category ?? "") === targetCategorySlug
+          );
+
+          for (const part of chunk(matches, 450)) {
+            const batch = writeBatch(db);
+            for (const d of part) {
+              batch.update(d.ref, {
+                "placement.isActive": nextIsActive,
+                "timestamps.updatedAt": serverTimestamp(),
+              });
+              activePropagation[col] += 1;
+            }
+            await batch.commit();
+          }
+        }
+      }
+    }
+
     // Return updated, normalized doc + propagation summary
     const saved = await getDoc(currRef);
     return ok({
       message: slugChanged ? "Category updated (slug propagated)." : "Category updated.",
       id: saved.id,
       data: normalizeTimestamps(saved.data()||{}),
-      ...(slugChanged ? { propagation: { from: oldSlug, to: newSlug, touched } } : {})
+      ...(slugChanged ? { propagation: { from: oldSlug, to: newSlug, touched } } : {}),
+      ...(activePropagation ? { active_propagation: activePropagation } : {})
     });
   }catch(e){
     console.error("categories/update failed:", e);

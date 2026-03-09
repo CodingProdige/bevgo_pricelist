@@ -31,6 +31,11 @@ import {
 
 const ok  =(p={},s=200)=>NextResponse.json({ ok:true, ...p },{ status:s });
 const err =(s,t,m,e={})=>NextResponse.json({ ok:false, title:t, message:m, ...e },{ status:s });
+const toBool = (v, f = false) =>
+  typeof v === "boolean" ? v :
+  typeof v === "number" ? v !== 0 :
+  typeof v === "string" ? ["true","1","yes","y"].includes(v.toLowerCase()) :
+  f;
 
 function deepMerge(target, patch){
   if (patch==null || typeof patch!=="object") return target;
@@ -84,6 +89,10 @@ export async function POST(req){
     // Decide if slug is changing
     const wantsNew = data?.subCategory && Object.prototype.hasOwnProperty.call(data.subCategory, "slug");
     const newSlug  = wantsNew ? String(next?.subCategory?.slug ?? "").trim() : oldSlug;
+    const isActiveTouched =
+      data?.placement &&
+      Object.prototype.hasOwnProperty.call(data.placement, "isActive");
+    const nextIsActive = toBool(next?.placement?.isActive, true);
 
     // Uniqueness check for new slug (in-memory)
     if (wantsNew && newSlug && newSlug !== oldSlug){
@@ -154,6 +163,35 @@ export async function POST(req){
       }
     }
 
+    // Cascade sub-category isActive to linked brands (products are intentionally independent)
+    let activePropagation = null;
+    if (isActiveTouched) {
+      const targetSubCategorySlug = newSlug || oldSlug;
+      activePropagation = { isActive: nextIsActive, brands: 0 };
+
+      if (targetSubCategorySlug) {
+        const rs = await getDocs(collection(db, "brands"));
+        const matches = rs.docs.filter((d) => {
+          const arr = Array.isArray(d.data()?.grouping?.subCategories)
+            ? d.data().grouping.subCategories.map((x) => String(x))
+            : [];
+          return arr.includes(targetSubCategorySlug);
+        });
+
+        for (const part of chunk(matches, 450)) {
+          const b = writeBatch(db);
+          for (const d of part) {
+            b.update(d.ref, {
+              "placement.isActive": nextIsActive,
+              "timestamps.updatedAt": serverTimestamp()
+            });
+            activePropagation.brands++;
+          }
+          await b.commit();
+        }
+      }
+    }
+
     return ok({
       id: docId,
       slug: newSlug,
@@ -161,6 +199,7 @@ export async function POST(req){
       propagated_to: to,
       migrated_products: migratedProducts,
       touched_brands: touchedBrands,
+      ...(activePropagation ? { active_propagation: activePropagation } : {}),
       message: wantsNew && newSlug !== oldSlug
         ? "Sub-category updated (slug propagated)."
         : "Sub-category updated."

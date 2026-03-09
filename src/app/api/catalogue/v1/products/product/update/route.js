@@ -19,6 +19,61 @@ const toBool= (v, f = false) =>
   f;
 const toInt = (v, f = 0) => Number.isFinite(+v) ? Math.trunc(+v) : f;
 
+async function findSingleBySlug(colName, fieldPath, slug) {
+  const s = toStr(slug);
+  if (!s) return { found: false, item: null, reason: "missing_slug" };
+
+  const rs = await getDocs(
+    query(collection(db, colName), where(fieldPath, "==", s))
+  );
+
+  if (rs.empty) return { found: false, item: null, reason: "not_found" };
+  if (rs.size > 1) return { found: false, item: null, reason: "not_unique" };
+
+  return { found: true, item: rs.docs[0].data() || {}, reason: null };
+}
+
+async function ensureParentsActive(nextProduct) {
+  const categorySlug = toStr(nextProduct?.grouping?.category);
+  const subCategorySlug = toStr(nextProduct?.grouping?.subCategory);
+  const brandSlug = toStr(nextProduct?.grouping?.brand);
+
+  const parentChecks = await Promise.all([
+    findSingleBySlug("categories", "category.slug", categorySlug),
+    findSingleBySlug("sub_categories", "subCategory.slug", subCategorySlug),
+    findSingleBySlug("brands", "brand.slug", brandSlug),
+  ]);
+
+  const parents = [
+    { key: "category", slug: categorySlug, check: parentChecks[0] },
+    { key: "subCategory", slug: subCategorySlug, check: parentChecks[1] },
+    { key: "brand", slug: brandSlug, check: parentChecks[2] },
+  ];
+
+  const invalid = [];
+  for (const p of parents) {
+    if (!p.slug) {
+      invalid.push({ parent: p.key, slug: null, issue: "missing_slug" });
+      continue;
+    }
+
+    if (!p.check.found) {
+      invalid.push({ parent: p.key, slug: p.slug, issue: p.check.reason });
+      continue;
+    }
+
+    const isActive = p.check.item?.placement?.isActive === true;
+    if (!isActive) {
+      invalid.push({ parent: p.key, slug: p.slug, issue: "inactive" });
+    }
+  }
+
+  return {
+    ok: invalid.length === 0,
+    invalid,
+  };
+}
+
 /* ------------------ title slug normalizer ------------------ */
 /* Prevents duplicates even if case/spacing/punctuation differs */
 function normalizeTitleSlug(title){
@@ -205,6 +260,10 @@ export async function POST(req){
     /* -- Build sanitized patch + merged object -- */
     const patch = sanitizePatch(data);
     const next  = deepMerge(current, patch);
+    const activatingProduct =
+      ("placement" in patch) &&
+      Object.prototype.hasOwnProperty.call(patch.placement || {}, "isActive") &&
+      patch?.placement?.isActive === true;
 
     /* ============================================================
        1. Duplicate title check using titleSlug (case-insensitive,
@@ -252,6 +311,19 @@ export async function POST(req){
           409,
           "Duplicate Title",
           `Another product in this grouping has a similar title ('${nextTitleRaw}').`
+        );
+      }
+    }
+
+    // Product can be activated only when all linked parent groupings are active.
+    if (activatingProduct) {
+      const parentState = await ensureParentsActive(next);
+      if (!parentState.ok) {
+        return err(
+          409,
+          "Parent Inactive",
+          "Product cannot be set to active because one or more parent groupings are inactive or invalid.",
+          { parent_issues: parentState.invalid }
         );
       }
     }
